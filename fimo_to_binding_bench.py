@@ -263,10 +263,16 @@ def write_table(df: pd.DataFrame, path: Path) -> None:
         try:
             df.to_parquet(path, index=False)
         except ImportError as exc:
-            raise ImportError(
-                f"Writing parquet requires pyarrow or fastparquet. "
-                f"Install one of them or write a .tsv/.csv instead: {path}"
-            ) from exc
+            try:
+                import polars as pl
+            except ImportError:
+                raise ImportError(
+                    f"Writing parquet requires pyarrow/fastparquet for pandas "
+                    f"or polars as a fallback. Install one of them or write a "
+                    f".tsv/.csv instead: {path}"
+                ) from exc
+
+            pl.DataFrame({column: df[column].tolist() for column in df.columns}).write_parquet(path)
     elif suffix == ".tsv":
         df.to_csv(path, sep="\t", index=False)
     elif suffix == ".csv":

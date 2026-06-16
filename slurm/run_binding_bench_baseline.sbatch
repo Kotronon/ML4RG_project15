@@ -12,9 +12,15 @@ PROJECT="${ML4RG_PROJECT:-/s/project/ml4rg_students/2026/project15}"
 DATASET="${DATASET:-_saccharomyces_cerevisiae_sequence_mapper}"
 SOURCE="${SOURCE:-fimo_streme}"
 TARGET_DATASET="${TARGET_DATASET:-DNA_rossi_chipexo}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="${REPO_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+if [[ -z "${REPO_DIR:-}" ]]; then
+    if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/fimo_to_binding_bench.py" ]]; then
+        REPO_DIR="${SLURM_SUBMIT_DIR}"
+    else
+        REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+    fi
+fi
 CONVERTER_SCRIPT="${CONVERTER_SCRIPT:-${REPO_DIR}/fimo_to_binding_bench.py}"
 BINDING_BENCH_REPO="${BINDING_BENCH_REPO:-}"
 BINDING_BENCH_BIN="${BINDING_BENCH_BIN:-binding_bench}"
@@ -25,6 +31,12 @@ PREDICTIONS="${INPUT_DIR}/${SOURCE}_${DATASET}_predictions.parquet"
 FEATURE_RANKS="${INPUT_DIR}/${SOURCE}_${DATASET}_feature_ranks.parquet"
 
 mkdir -p "${INPUT_DIR}" "${RUN_DIR}" "${REPO_DIR}/slurm/logs"
+
+if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    echo "Python executable not found: ${PYTHON_BIN}" >&2
+    echo "Set PYTHON_BIN to the full Python path from test.ipynb, e.g. sys.executable." >&2
+    exit 127
+fi
 
 echo "Project:          ${PROJECT}"
 echo "Repo dir:         ${REPO_DIR}"
