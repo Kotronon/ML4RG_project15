@@ -47,6 +47,9 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     exit 127
 fi
 
+CONDA_PREFIX="$(${PYTHON_BIN} -c 'import sys; print(sys.prefix)')"
+export PATH="${CONDA_PREFIX}/bin:${PATH}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export PYTHONUNBUFFERED=1
@@ -55,6 +58,7 @@ echo "Project:              ${PROJECT}"
 echo "Repo dir:             ${REPO_DIR}"
 echo "Train script:         ${TRAIN_SCRIPT}"
 echo "Python:               $(${PYTHON_BIN} -c 'import sys; print(sys.executable)')"
+echo "Conda prefix:         ${CONDA_PREFIX}"
 echo "Sites:                ${SITES_PATH}"
 echo "Regions:              ${REGIONS_PATH}"
 echo "Output dir:           ${OUTPUT_DIR}"
