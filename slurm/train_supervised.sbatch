@@ -3,6 +3,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=08:00:00
+#SBATCH --partition=student_project
 #SBATCH --output=slurm/logs/supervised-%j.out
 #SBATCH --error=slurm/logs/supervised-%j.err
 
