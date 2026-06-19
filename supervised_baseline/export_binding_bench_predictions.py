@@ -51,6 +51,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--scan-stride", type=int, default=1)
     parser.add_argument("--top-k-per-tf", type=int, default=5000)
+    parser.add_argument(
+        "--nms-radius-bp",
+        type=int,
+        default=50,
+        help=(
+            "Collapse nearby high-scoring centers per TF before export. "
+            "Use 0 to disable non-maximum suppression."
+        ),
+    )
+    parser.add_argument(
+        "--pre-nms-factor",
+        type=int,
+        default=20,
+        help=(
+            "Keep top_k_per_tf * pre_nms_factor dense candidates per TF before "
+            "non-maximum suppression."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--score-mode", choices=("sigmoid", "logit"), default="sigmoid")
@@ -130,6 +148,46 @@ class TopKBuffer:
         self.scores = np.take_along_axis(scores, keep_rows, axis=0)
         self.chrom_codes = np.take_along_axis(chrom_codes, keep_rows, axis=0)
         self.starts = np.take_along_axis(starts, keep_rows, axis=0)
+
+
+def nms_indices(
+    *,
+    chrom_codes: np.ndarray,
+    starts: np.ndarray,
+    scores: np.ndarray,
+    radius_bp: int,
+    max_keep: int,
+) -> np.ndarray:
+    order = np.argsort(-scores)
+    if radius_bp <= 0:
+        return order[:max_keep]
+
+    suppressed = np.zeros(len(scores), dtype=bool)
+    sorted_by_chrom: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+    for chrom_code in np.unique(chrom_codes):
+        chrom_idx = np.flatnonzero(chrom_codes == chrom_code)
+        start_order = np.argsort(starts[chrom_idx], kind="mergesort")
+        sorted_idx = chrom_idx[start_order]
+        sorted_starts = starts[sorted_idx]
+        sorted_by_chrom[int(chrom_code)] = (sorted_idx, sorted_starts)
+
+    selected: list[int] = []
+    for candidate_idx in order:
+        if suppressed[candidate_idx]:
+            continue
+        selected.append(int(candidate_idx))
+        if len(selected) >= max_keep:
+            break
+
+        chrom_code = int(chrom_codes[candidate_idx])
+        sorted_idx, sorted_starts = sorted_by_chrom[chrom_code]
+        center = starts[candidate_idx]
+        lo = np.searchsorted(sorted_starts, center - radius_bp, side="left")
+        hi = np.searchsorted(sorted_starts, center + radius_bp, side="right")
+        suppressed[sorted_idx[lo:hi]] = True
+
+    return np.asarray(selected, dtype=np.int64)
 
 
 def read_regions(path: Path, max_regions: int | None) -> list[dict[str, object]]:
@@ -215,6 +273,8 @@ def write_outputs(
     topk: TopKBuffer,
     tf_names: list[str],
     chrom_names: list[str],
+    nms_radius_bp: int,
+    top_k_per_tf: int,
 ) -> None:
     prediction_frames = []
     feature_scores = []
@@ -225,10 +285,19 @@ def write_outputs(
         if not valid.any():
             continue
 
-        order = np.argsort(-scores[valid])
-        starts = topk.starts[valid, feature_idx][order]
-        chrom_codes = topk.chrom_codes[valid, feature_idx][order]
-        sorted_scores = scores[valid][order]
+        starts_raw = topk.starts[valid, feature_idx]
+        chrom_codes_raw = topk.chrom_codes[valid, feature_idx]
+        scores_raw = scores[valid]
+        keep = nms_indices(
+            chrom_codes=chrom_codes_raw,
+            starts=starts_raw,
+            scores=scores_raw,
+            radius_bp=nms_radius_bp,
+            max_keep=top_k_per_tf,
+        )
+        starts = starts_raw[keep]
+        chrom_codes = chrom_codes_raw[keep]
+        sorted_scores = scores_raw[keep]
         feature_scores.append((tf_name, float(sorted_scores[0])))
 
         prediction_frames.append(
@@ -247,7 +316,19 @@ def write_outputs(
     if not prediction_frames:
         raise RuntimeError("No predictions were produced")
 
-    predictions = pl.concat(prediction_frames, how="vertical")
+    predictions = (
+        pl.concat(prediction_frames, how="vertical")
+        .sort(["feature_idx", "score"], descending=[False, True])
+        .unique(
+            subset=["chrom", "start", "end", "feature_idx"],
+            keep="first",
+            maintain_order=True,
+        )
+        .sort(
+            ["feature_idx", "score", "chrom", "start"],
+            descending=[False, True, False, False],
+        )
+    )
     predictions_out.parent.mkdir(parents=True, exist_ok=True)
     predictions.write_parquet(predictions_out)
 
@@ -276,6 +357,10 @@ def main() -> None:
         raise ValueError("--scan-stride must be positive")
     if args.top_k_per_tf <= 0:
         raise ValueError("--top-k-per-tf must be positive")
+    if args.nms_radius_bp < 0:
+        raise ValueError("--nms-radius-bp must be non-negative")
+    if args.pre_nms_factor <= 0:
+        raise ValueError("--pre-nms-factor must be positive")
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
 
@@ -299,7 +384,12 @@ def main() -> None:
     model.eval()
 
     regions = read_regions(args.regions_path, args.max_regions)
-    topk = TopKBuffer(n_features=len(tf_names), k=args.top_k_per_tf)
+    candidate_k = (
+        args.top_k_per_tf
+        if args.nms_radius_bp == 0
+        else args.top_k_per_tf * args.pre_nms_factor
+    )
+    topk = TopKBuffer(n_features=len(tf_names), k=candidate_k)
     chrom_to_code: dict[str, int] = {}
     chrom_names: list[str] = []
 
@@ -317,6 +407,8 @@ def main() -> None:
     print(f"Sequence orientation: {sequence_orientation}")
     print(f"Scan stride:          {args.scan_stride}")
     print(f"Top K per TF:         {args.top_k_per_tf}")
+    print(f"Pre-NMS candidates:   {candidate_k}")
+    print(f"NMS radius bp:        {args.nms_radius_bp}")
 
     def flush() -> None:
         nonlocal windows, chrom_codes, starts, n_scanned
@@ -381,6 +473,8 @@ def main() -> None:
         topk=topk,
         tf_names=[str(name) for name in tf_names],
         chrom_names=chrom_names,
+        nms_radius_bp=args.nms_radius_bp,
+        top_k_per_tf=args.top_k_per_tf,
     )
 
     metadata = {
@@ -390,6 +484,9 @@ def main() -> None:
         "sequence_orientation": sequence_orientation,
         "scan_stride": args.scan_stride,
         "top_k_per_tf": args.top_k_per_tf,
+        "pre_nms_factor": args.pre_nms_factor,
+        "candidate_k_per_tf": candidate_k,
+        "nms_radius_bp": args.nms_radius_bp,
         "score_mode": args.score_mode,
         "n_scanned_windows": n_scanned,
         "n_tfs": len(tf_names),

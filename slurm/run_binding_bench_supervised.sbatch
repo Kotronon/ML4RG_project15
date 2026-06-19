@@ -30,7 +30,9 @@ MODEL_DIR="${MODEL_DIR:-${PROJECT}/working/supervised_baseline/models/small_cnn_
 CHECKPOINT="${CHECKPOINT:-${MODEL_DIR}/best.pt}"
 REGIONS_PATH="${REGIONS_PATH:-/s/project/multispecies/fungi_code/tf_sae/processed/sequence_datasets/fungi_upstream_ATG_1000/_saccharomyces_cerevisiae_sequence_mapper.parquet}"
 
-METHOD_NAME="${METHOD_NAME:-supervised_small_cnn}"
+NMS_RADIUS_BP="${NMS_RADIUS_BP:-50}"
+PRE_NMS_FACTOR="${PRE_NMS_FACTOR:-20}"
+METHOD_NAME="${METHOD_NAME:-supervised_small_cnn_nms${NMS_RADIUS_BP}}"
 INPUT_DIR="${PROJECT}/working/binding_bench_inputs"
 RUN_DIR="${PROJECT}/working/binding_bench_runs/${METHOD_NAME}"
 PREDICTIONS="${PREDICTIONS:-${INPUT_DIR}/${METHOD_NAME}_predictions.parquet}"
@@ -73,6 +75,8 @@ echo "Run dir:              ${RUN_DIR}"
 echo "Target dataset:       ${TARGET_DATASET}"
 echo "Scan stride:          ${SCAN_STRIDE}"
 echo "Top K per TF:         ${TOP_K_PER_TF}"
+echo "NMS radius bp:        ${NMS_RADIUS_BP}"
+echo "Pre-NMS factor:       ${PRE_NMS_FACTOR}"
 echo "Device:               ${DEVICE}"
 
 WINDOW_ARG=()
@@ -92,6 +96,8 @@ fi
     --feature-ranks-out "${FEATURE_RANKS}" \
     --scan-stride "${SCAN_STRIDE}" \
     --top-k-per-tf "${TOP_K_PER_TF}" \
+    --nms-radius-bp "${NMS_RADIUS_BP}" \
+    --pre-nms-factor "${PRE_NMS_FACTOR}" \
     --batch-size "${EXPORT_BATCH_SIZE}" \
     --device "${DEVICE}" \
     --score-mode "${SCORE_MODE}" \
