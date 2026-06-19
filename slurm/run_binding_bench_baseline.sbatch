@@ -59,7 +59,7 @@ echo "Run dir:          ${RUN_DIR}"
 
 if [[ -n "${BINDING_BENCH_REPO}" ]]; then
     export PYTHONPATH="${BINDING_BENCH_REPO}/src:${PYTHONPATH:-}"
-    "${PYTHON_BIN}" -m binding_bench.cli discrete \
+    "${PYTHON_BIN}" -c 'from binding_bench.cli import main; main()' discrete \
         --input "${PREDICTIONS}" \
         --dataset "${TARGET_DATASET}" \
         --output_dir "${RUN_DIR}" \
