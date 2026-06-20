@@ -10,7 +10,7 @@ import subprocess
 import threading
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -1192,6 +1192,13 @@ def export_fimo_for_binding_bench(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the STREME/MEME pipeline.")
     parser.add_argument("--project", type=Path)
+    parser.add_argument(
+        "--result-tag",
+        help=(
+            "Store results and logs in a tagged subdirectory, for example "
+            "'nmotifs_100', without overwriting the default run."
+        ),
+    )
     parser.add_argument("--fasta", type=Path)
     parser.add_argument("--array-index", type=int)
     parser.add_argument(
@@ -1231,6 +1238,14 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     config = PipelineConfig.default(args.project)
+    if args.result_tag:
+        if Path(args.result_tag).name != args.result_tag or args.result_tag in {".", ".."}:
+            raise ValueError("--result-tag must be a single directory name.")
+        config = replace(
+            config,
+            result_dir=config.result_dir / args.result_tag,
+            log_dir=config.log_dir / args.result_tag,
+        )
     if args.summarize:
         config.ensure_directories()
     else:

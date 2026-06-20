@@ -133,6 +133,23 @@ def motif_order(feature_idx: object) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def motif_consensus(feature_idx: object) -> str:
+    value = str(feature_idx)
+    return value.split("-", 1)[1].upper() if "-" in value else value.upper()
+
+
+def is_low_complexity_motif(feature_idx: object) -> bool:
+    sequence = motif_consensus(feature_idx)
+    if not sequence:
+        return True
+    if re.search(r"([ACGT])\1{7,}", sequence):
+        return True
+    at_fraction = sum(base in "AT" for base in sequence) / len(sequence)
+    if len(sequence) >= 10 and at_fraction >= 0.85:
+        return True
+    return re.fullmatch(r"([ACGT]{2})\1{4,}", sequence) is not None
+
+
 def build_feature_ranks(predictions: pd.DataFrame, rank_method: str) -> pd.DataFrame:
     grouped = predictions.groupby("feature_idx", dropna=False)
 
@@ -337,6 +354,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Keep only the top N predictions per feature after scoring.",
     )
+    parser.add_argument(
+        "--filter-low-complexity",
+        action="store_true",
+        help=(
+            "Remove motifs with long homopolymers, simple dinucleotide repeats, "
+            "or at least 85%% A/T content at length 10 or greater."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -358,6 +383,17 @@ def main() -> None:
         score_mode=args.score_mode,
         top_n_per_feature=args.top_n_per_feature,
     )
+    removed_features: list[str] = []
+    if args.filter_low_complexity:
+        features = predictions["feature_idx"].drop_duplicates()
+        removed_features = sorted(
+            str(feature) for feature in features if is_low_complexity_motif(feature)
+        )
+        predictions = predictions.loc[
+            ~predictions["feature_idx"].isin(removed_features)
+        ].reset_index(drop=True)
+        if predictions.empty:
+            raise ValueError("Low-complexity filtering removed every motif.")
     feature_ranks = build_feature_ranks(predictions, args.rank_method)
 
     write_table(predictions, predictions_out)
@@ -366,6 +402,11 @@ def main() -> None:
     print(f"Read FIMO hits: {fimo_path}")
     print(f"Wrote predictions: {predictions_out} ({len(predictions):,} rows)")
     print(f"Wrote feature ranks: {feature_ranks_out} ({len(feature_ranks):,} features)")
+    if args.filter_low_complexity:
+        print(
+            f"Removed low-complexity motifs ({len(removed_features)}): "
+            + ", ".join(removed_features)
+        )
     print("Preview:")
     print(predictions.head().to_string(index=False))
 
