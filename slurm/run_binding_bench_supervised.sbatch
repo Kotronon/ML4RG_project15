@@ -26,13 +26,15 @@ EXPORT_SCRIPT="${EXPORT_SCRIPT:-${REPO_DIR}/supervised_baseline/export_binding_b
 BINDING_BENCH_REPO="${BINDING_BENCH_REPO:-${HOME}/binding_bench}"
 BINDING_BENCH_BIN="${BINDING_BENCH_BIN:-binding_bench}"
 
-MODEL_DIR="${MODEL_DIR:-${PROJECT}/working/supervised_baseline/models/small_cnn_overfit}"
+MODEL="${MODEL:-small_cnn}"
+MODEL_DIR="${MODEL_DIR:-${PROJECT}/working/supervised_baseline/models/${MODEL}_overfit}"
 CHECKPOINT="${CHECKPOINT:-${MODEL_DIR}/best.pt}"
 REGIONS_PATH="${REGIONS_PATH:-/s/project/multispecies/fungi_code/tf_sae/processed/sequence_datasets/fungi_upstream_ATG_1000/_saccharomyces_cerevisiae_sequence_mapper.parquet}"
 
 NMS_RADIUS_BP="${NMS_RADIUS_BP:-50}"
 PRE_NMS_FACTOR="${PRE_NMS_FACTOR:-20}"
-METHOD_NAME="${METHOD_NAME:-supervised_small_cnn_nms${NMS_RADIUS_BP}}"
+METHOD_NAME="${METHOD_NAME:-supervised_${MODEL}_nms${NMS_RADIUS_BP}}"
+DISPLAY_NAME="${DISPLAY_NAME:-Supervised ${MODEL}}"
 INPUT_DIR="${PROJECT}/working/binding_bench_inputs"
 RUN_DIR="${PROJECT}/working/binding_bench_runs/${METHOD_NAME}"
 PREDICTIONS="${PREDICTIONS:-${INPUT_DIR}/${METHOD_NAME}_predictions.parquet}"
@@ -67,6 +69,7 @@ echo "Repo dir:             ${REPO_DIR}"
 echo "Export script:        ${EXPORT_SCRIPT}"
 echo "Python:               $(${PYTHON_BIN} -c 'import sys; print(sys.executable)')"
 echo "Conda prefix:         ${CONDA_PREFIX}"
+echo "Model:                ${MODEL}"
 echo "Checkpoint:           ${CHECKPOINT}"
 echo "Regions:              ${REGIONS_PATH}"
 echo "Predictions:          ${PREDICTIONS}"
@@ -116,7 +119,7 @@ if [[ -n "${BINDING_BENCH_REPO}" && -d "${BINDING_BENCH_REPO}/src" ]]; then
         --ba_by_feature_rank \
         --feature_rank_path "${FEATURE_RANKS}" \
         --feature_rank_name model_max_score \
-        --display_name "Supervised small CNN" \
+        --display_name "${DISPLAY_NAME}" \
         --overwrite
 else
     "${BINDING_BENCH_BIN}" discrete \
@@ -128,7 +131,7 @@ else
         --ba_by_feature_rank \
         --feature_rank_path "${FEATURE_RANKS}" \
         --feature_rank_name model_max_score \
-        --display_name "Supervised small CNN" \
+        --display_name "${DISPLAY_NAME}" \
         --overwrite
 fi
 

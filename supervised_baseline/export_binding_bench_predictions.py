@@ -11,10 +11,10 @@ from tqdm import tqdm
 
 try:
     from .dataset import DEFAULT_REGIONS_PATH
-    from .model import smallCNN
+    from .model import MODEL_NAMES, build_model, parse_dilations
 except ImportError:
     from dataset import DEFAULT_REGIONS_PATH
-    from model import smallCNN
+    from model import MODEL_NAMES, build_model, parse_dilations
 
 
 DEFAULT_PROJECT = Path("/s/project/ml4rg_students/2026/project15")
@@ -33,6 +33,30 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_MODEL_DIR / "best.pt")
     parser.add_argument("--regions-path", type=Path, default=DEFAULT_REGIONS_PATH)
+    parser.add_argument(
+        "--model",
+        choices=MODEL_NAMES,
+        help="Override checkpoint model metadata. Defaults to the saved model.",
+    )
+    parser.add_argument(
+        "--hidden-channels",
+        type=int,
+        help="Override hidden channels when reconstructing res_dilated_cnn.",
+    )
+    parser.add_argument(
+        "--kernel-size",
+        type=int,
+        help="Override residual kernel size when reconstructing res_dilated_cnn.",
+    )
+    parser.add_argument(
+        "--dilations",
+        help="Override comma-separated dilations when reconstructing res_dilated_cnn.",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        help="Override dropout when reconstructing res_dilated_cnn.",
+    )
     parser.add_argument(
         "--predictions-out",
         type=Path,
@@ -98,6 +122,46 @@ def checkpoint_arg(checkpoint: dict[str, object], name: str, default: object) ->
     if isinstance(args, dict):
         return args.get(name, default)
     return default
+
+
+def checkpoint_model_config(checkpoint: dict[str, object]) -> dict[str, object]:
+    config = checkpoint.get("model_config", {})
+    if isinstance(config, dict):
+        return dict(config)
+    return {}
+
+
+def resolve_model_config(
+    args: argparse.Namespace,
+    checkpoint: dict[str, object],
+) -> dict[str, object]:
+    saved_config = checkpoint_model_config(checkpoint)
+    model_name = (
+        args.model
+        or str(checkpoint.get("model_name") or saved_config.get("model_name") or checkpoint_arg(checkpoint, "model", "small_cnn"))
+    )
+    hidden_channels = args.hidden_channels or int(
+        saved_config.get("hidden_channels", checkpoint_arg(checkpoint, "hidden_channels", 128))
+    )
+    kernel_size = args.kernel_size or int(
+        saved_config.get("kernel_size", checkpoint_arg(checkpoint, "kernel_size", 7))
+    )
+    dropout = args.dropout
+    if dropout is None:
+        dropout = float(saved_config.get("dropout", checkpoint_arg(checkpoint, "dropout", 0.1)))
+    dilations_raw = (
+        args.dilations
+        if args.dilations is not None
+        else saved_config.get("dilations", checkpoint_arg(checkpoint, "dilations", "1,2,4,8,16"))
+    )
+
+    return {
+        "model_name": model_name,
+        "hidden_channels": hidden_channels,
+        "kernel_size": kernel_size,
+        "dropout": float(dropout),
+        "dilations": parse_dilations(dilations_raw),
+    }
 
 
 def one_hot_batch(sequences: list[str], window_size: int) -> torch.Tensor:
@@ -379,7 +443,15 @@ def main() -> None:
     if sequence_orientation not in {"strand-aware", "genomic"}:
         raise ValueError(f"Unsupported sequence orientation: {sequence_orientation}")
 
-    model = smallCNN(n_tfs=len(tf_names)).to(device)
+    model_config = resolve_model_config(args, checkpoint)
+    model = build_model(
+        str(model_config["model_name"]),
+        n_tfs=len(tf_names),
+        hidden_channels=int(model_config["hidden_channels"]),
+        kernel_size=int(model_config["kernel_size"]),
+        dropout=float(model_config["dropout"]),
+        dilations=model_config["dilations"],
+    ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
@@ -402,6 +474,7 @@ def main() -> None:
     print(f"Checkpoint:           {args.checkpoint}")
     print(f"Regions:              {args.regions_path}")
     print(f"Device:               {device}")
+    print(f"Model:                {model_config['model_name']}")
     print(f"TF outputs:           {len(tf_names)}")
     print(f"Window size:          {window_size}")
     print(f"Sequence orientation: {sequence_orientation}")
@@ -490,6 +563,10 @@ def main() -> None:
         "score_mode": args.score_mode,
         "n_scanned_windows": n_scanned,
         "n_tfs": len(tf_names),
+        "model_config": {
+            **model_config,
+            "dilations": list(model_config["dilations"]),
+        },
     }
     metadata_path = args.predictions_out.with_suffix(".metadata.json")
     with metadata_path.open("w") as handle:

@@ -23,11 +23,16 @@ fi
 TRAIN_SCRIPT="${TRAIN_SCRIPT:-${REPO_DIR}/supervised_baseline/train.py}"
 SITES_PATH="${SITES_PATH:-/s/project/multispecies/fungi_code/tf_sae/binding_bench_datasets/val/dna/_saccharomyces_cerevisiae/DNA_rossi_chipexo_sites.parquet}"
 REGIONS_PATH="${REGIONS_PATH:-/s/project/multispecies/fungi_code/tf_sae/processed/sequence_datasets/fungi_upstream_ATG_1000/_saccharomyces_cerevisiae_sequence_mapper.parquet}"
-OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT}/working/supervised_baseline/models/small_cnn_overfit}"
 
+MODEL="${MODEL:-small_cnn}"
+OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT}/working/supervised_baseline/models/${MODEL}_overfit}"
 WINDOW_SIZE="${WINDOW_SIZE:-101}"
 NEGATIVE_RATIO="${NEGATIVE_RATIO:-1.0}"
 MIN_SITES_PER_TF="${MIN_SITES_PER_TF:-15}"
+HIDDEN_CHANNELS="${HIDDEN_CHANNELS:-128}"
+KERNEL_SIZE="${KERNEL_SIZE:-7}"
+DILATIONS="${DILATIONS:-1,2,4,8,16}"
+DROPOUT="${DROPOUT:-0.1}"
 EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
 LR="${LR:-0.001}"
@@ -62,9 +67,14 @@ echo "Conda prefix:         ${CONDA_PREFIX}"
 echo "Sites:                ${SITES_PATH}"
 echo "Regions:              ${REGIONS_PATH}"
 echo "Output dir:           ${OUTPUT_DIR}"
+echo "Model:                ${MODEL}"
 echo "Window size:          ${WINDOW_SIZE}"
 echo "Negative ratio:       ${NEGATIVE_RATIO}"
 echo "Min sites per TF:     ${MIN_SITES_PER_TF}"
+echo "Hidden channels:      ${HIDDEN_CHANNELS}"
+echo "Kernel size:          ${KERNEL_SIZE}"
+echo "Dilations:            ${DILATIONS}"
+echo "Dropout:              ${DROPOUT}"
 echo "Epochs:               ${EPOCHS}"
 echo "Batch size:           ${BATCH_SIZE}"
 echo "Device:               ${DEVICE}"
@@ -75,9 +85,14 @@ echo "Extra args:           ${EXTRA_ARGS}"
     --sites-path "${SITES_PATH}" \
     --regions-path "${REGIONS_PATH}" \
     --output-dir "${OUTPUT_DIR}" \
+    --model "${MODEL}" \
     --window-size "${WINDOW_SIZE}" \
     --negative-ratio "${NEGATIVE_RATIO}" \
     --min-sites-per-tf "${MIN_SITES_PER_TF}" \
+    --hidden-channels "${HIDDEN_CHANNELS}" \
+    --kernel-size "${KERNEL_SIZE}" \
+    --dilations "${DILATIONS}" \
+    --dropout "${DROPOUT}" \
     --epochs "${EPOCHS}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \

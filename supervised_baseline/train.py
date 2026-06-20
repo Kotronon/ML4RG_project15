@@ -13,15 +13,15 @@ from torch.utils.data import DataLoader
 
 try:
     from .dataset import BindingBenchWindowDataset, DEFAULT_REGIONS_PATH, DEFAULT_SITES_PATH
-    from .model import smallCNN
+    from .model import MODEL_NAMES, build_model, parse_dilations
 except ImportError:
     from dataset import BindingBenchWindowDataset, DEFAULT_REGIONS_PATH, DEFAULT_SITES_PATH
-    from model import smallCNN
+    from model import MODEL_NAMES, build_model, parse_dilations
 
 
-DEFAULT_OUTPUT_DIR = Path(
+DEFAULT_MODEL_ROOT = Path(
     "/s/project/ml4rg_students/2026/project15/working/"
-    "supervised_baseline/models/small_cnn_overfit"
+    "supervised_baseline/models"
 )
 
 
@@ -37,11 +37,18 @@ class EpochStats:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train a small supervised CNN on Binding Bench windows."
+        description="Train a supervised CNN on Binding Bench windows."
     )
     parser.add_argument("--sites-path", type=Path, default=DEFAULT_SITES_PATH)
     parser.add_argument("--regions-path", type=Path, default=DEFAULT_REGIONS_PATH)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help=(
+            "Directory for checkpoints and metadata. Defaults to a model-specific "
+            "directory under the project working area."
+        ),
+    )
     parser.add_argument("--window-size", type=int, default=101)
     parser.add_argument("--negative-ratio", type=float, default=1.0)
     parser.add_argument("--negative-exclusion-bp", type=int)
@@ -51,6 +58,35 @@ def parse_args() -> argparse.Namespace:
         "--sequence-orientation",
         choices=("strand-aware", "genomic"),
         default="strand-aware",
+    )
+    parser.add_argument(
+        "--model",
+        choices=MODEL_NAMES,
+        default="small_cnn",
+        help="Model architecture to train.",
+    )
+    parser.add_argument(
+        "--hidden-channels",
+        type=int,
+        default=128,
+        help="Hidden channel count for res_dilated_cnn.",
+    )
+    parser.add_argument(
+        "--kernel-size",
+        type=int,
+        default=7,
+        help="Residual block kernel size for res_dilated_cnn. Must be odd.",
+    )
+    parser.add_argument(
+        "--dilations",
+        default="1,2,4,8,16",
+        help="Comma-separated residual block dilations for res_dilated_cnn.",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.1,
+        help="Dropout probability for res_dilated_cnn.",
     )
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -70,7 +106,10 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Save an epoch checkpoint every N epochs; 0 disables periodic checkpoints.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.output_dir is None:
+        args.output_dir = DEFAULT_MODEL_ROOT / f"{args.model}_overfit"
+    return args
 
 
 def set_seed(seed: int) -> None:
@@ -109,6 +148,20 @@ def serializable_args(args: argparse.Namespace) -> dict[str, object]:
     return out
 
 
+def model_config_from_args(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "model_name": args.model,
+        "hidden_channels": args.hidden_channels,
+        "kernel_size": args.kernel_size,
+        "dropout": args.dropout,
+        "dilations": list(parse_dilations(args.dilations)),
+    }
+
+
+def count_parameters(model: torch.nn.Module) -> int:
+    return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+
+
 def save_checkpoint(
     path: Path,
     *,
@@ -123,6 +176,8 @@ def save_checkpoint(
     torch.save(
         {
             "epoch": epoch,
+            "model_name": args.model,
+            "model_config": model_config_from_args(args),
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "args": serializable_args(args),
@@ -189,6 +244,7 @@ def main() -> None:
     args = parse_args()
     set_seed(args.seed)
     device = get_device(args.device)
+    dilations = parse_dilations(args.dilations)
 
     dataset = BindingBenchWindowDataset(
         sites_path=args.sites_path,
@@ -203,6 +259,7 @@ def main() -> None:
     )
     print("Dataset:", dataset.summary())
     print("Device:", device)
+    print("Model:", args.model)
 
     loader = DataLoader(
         dataset,
@@ -212,7 +269,15 @@ def main() -> None:
         pin_memory=device.type == "cuda",
     )
 
-    model = smallCNN(n_tfs=len(dataset.tf_names)).to(device)
+    model = build_model(
+        args.model,
+        n_tfs=len(dataset.tf_names),
+        hidden_channels=args.hidden_channels,
+        kernel_size=args.kernel_size,
+        dropout=args.dropout,
+        dilations=dilations,
+    ).to(device)
+    print("Trainable parameters:", count_parameters(model))
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
@@ -233,6 +298,7 @@ def main() -> None:
     save_json(args.output_dir / "tf_names.json", dataset.tf_names)
     save_json(args.output_dir / "dataset_summary.json", dataset.summary())
     save_json(args.output_dir / "args.json", serializable_args(args))
+    save_json(args.output_dir / "model_config.json", model_config_from_args(args))
 
     best_loss = float("inf")
     history: list[dict[str, float | int]] = []
