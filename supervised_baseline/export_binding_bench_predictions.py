@@ -437,7 +437,7 @@ def write_outputs(
     if not prediction_frames:
         raise RuntimeError("No predictions were produced")
 
-    predictions = (
+    full_predictions = (
         pl.concat(prediction_frames, how="vertical")
         .sort(["feature_idx", "score"], descending=[False, True])
         .unique(
@@ -450,8 +450,20 @@ def write_outputs(
             descending=[False, True, False, False],
         )
     )
+
+    predictions = full_predictions.select(
+        "chrom",
+        "start",
+        "end",
+        "feature_idx",
+        "score",
+        "strand",
+    )
     predictions_out.parent.mkdir(parents=True, exist_ok=True)
     predictions.write_parquet(predictions_out)
+
+    audit_out = predictions_out.with_suffix(".audit.parquet")
+    full_predictions.write_parquet(audit_out)
 
     ranks = (
         pl.DataFrame(
@@ -472,6 +484,7 @@ def write_outputs(
     ranks.write_parquet(feature_ranks_out)
 
     print(f"Wrote predictions: {predictions_out} ({predictions.height:,} rows)")
+    print(f"Wrote audit table: {audit_out} ({full_predictions.height:,} rows)")
     print(f"Wrote feature ranks: {feature_ranks_out} ({ranks.height:,} features)")
     print("Preview:")
     print(predictions.head(5))
