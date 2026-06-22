@@ -33,8 +33,11 @@ REGIONS_PATH="${REGIONS_PATH:-/s/project/multispecies/fungi_code/tf_sae/processe
 
 NMS_RADIUS_BP="${NMS_RADIUS_BP:-50}"
 PRE_NMS_FACTOR="${PRE_NMS_FACTOR:-20}"
-METHOD_NAME="${METHOD_NAME:-supervised_${MODEL}_nms${NMS_RADIUS_BP}}"
-DISPLAY_NAME="${DISPLAY_NAME:-Supervised ${MODEL}}"
+SCORE_MODE="${SCORE_MODE:-logit}"
+FEATURE_RANK_METHOD="${FEATURE_RANK_METHOD:-max-score}"
+FEATURE_RANK_NAME="${FEATURE_RANK_NAME:-model_score}"
+METHOD_NAME="${METHOD_NAME:-supervised_${MODEL}_${SCORE_MODE}_nms${NMS_RADIUS_BP}}"
+DISPLAY_NAME="${DISPLAY_NAME:-Supervised ${MODEL} (${SCORE_MODE})}"
 INPUT_DIR="${PROJECT}/working/binding_bench_inputs"
 RUN_DIR="${PROJECT}/working/binding_bench_runs/${METHOD_NAME}"
 PREDICTIONS="${PREDICTIONS:-${INPUT_DIR}/${METHOD_NAME}_predictions.parquet}"
@@ -46,7 +49,6 @@ SCAN_STRIDE="${SCAN_STRIDE:-1}"
 TOP_K_PER_TF="${TOP_K_PER_TF:-5000}"
 EXPORT_BATCH_SIZE="${EXPORT_BATCH_SIZE:-8192}"
 DEVICE="${DEVICE:-auto}"
-SCORE_MODE="${SCORE_MODE:-sigmoid}"
 EXTRA_EXPORT_ARGS="${EXTRA_EXPORT_ARGS:-}"
 
 mkdir -p "${INPUT_DIR}" "${RUN_DIR}" "${REPO_DIR}/slurm/logs"
@@ -80,6 +82,8 @@ echo "Scan stride:          ${SCAN_STRIDE}"
 echo "Top K per TF:         ${TOP_K_PER_TF}"
 echo "NMS radius bp:        ${NMS_RADIUS_BP}"
 echo "Pre-NMS factor:       ${PRE_NMS_FACTOR}"
+echo "Score mode:           ${SCORE_MODE}"
+echo "Feature rank method:  ${FEATURE_RANK_METHOD}"
 echo "Device:               ${DEVICE}"
 
 WINDOW_ARG=()
@@ -104,6 +108,7 @@ fi
     --batch-size "${EXPORT_BATCH_SIZE}" \
     --device "${DEVICE}" \
     --score-mode "${SCORE_MODE}" \
+    --feature-rank-method "${FEATURE_RANK_METHOD}" \
     "${WINDOW_ARG[@]}" \
     "${ORIENTATION_ARG[@]}" \
     ${EXTRA_EXPORT_ARGS}
@@ -118,7 +123,7 @@ if [[ -n "${BINDING_BENCH_REPO}" && -d "${BINDING_BENCH_REPO}/src" ]]; then
         --best_assignment \
         --ba_by_feature_rank \
         --feature_rank_path "${FEATURE_RANKS}" \
-        --feature_rank_name model_max_score \
+        --feature_rank_name "${FEATURE_RANK_NAME}" \
         --display_name "${DISPLAY_NAME}" \
         --overwrite
 else
@@ -130,7 +135,7 @@ else
         --best_assignment \
         --ba_by_feature_rank \
         --feature_rank_path "${FEATURE_RANKS}" \
-        --feature_rank_name model_max_score \
+        --feature_rank_name "${FEATURE_RANK_NAME}" \
         --display_name "${DISPLAY_NAME}" \
         --overwrite
 fi

@@ -95,7 +95,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--score-mode", choices=("sigmoid", "logit"), default="sigmoid")
+    parser.add_argument("--score-mode", choices=("sigmoid", "logit"), default="logit")
+    parser.add_argument(
+        "--feature-rank-method",
+        choices=("max-score", "mean-top-score", "hit-count", "tf-name"),
+        default="max-score",
+        help=(
+            "How to rank model-output features for Binding Bench per-rank "
+            "best-assignment curves."
+        ),
+    )
     parser.add_argument(
         "--max-regions",
         type=int,
@@ -180,12 +189,14 @@ class TopKBuffer:
         self.k = k
         self.scores = np.full((k, n_features), -np.inf, dtype=np.float32)
         self.chrom_codes = np.full((k, n_features), -1, dtype=np.int32)
+        self.region_codes = np.full((k, n_features), -1, dtype=np.int32)
         self.starts = np.zeros((k, n_features), dtype=np.int64)
 
     def update(
         self,
         batch_scores: np.ndarray,
         batch_chrom_codes: np.ndarray,
+        batch_region_codes: np.ndarray,
         batch_starts: np.ndarray,
     ) -> None:
         if batch_scores.shape[0] == 0:
@@ -196,21 +207,27 @@ class TopKBuffer:
             local_rows = np.argpartition(batch_scores, -local_k, axis=0)[-local_k:, :]
             local_scores = np.take_along_axis(batch_scores, local_rows, axis=0)
             local_chrom_codes = batch_chrom_codes[local_rows]
+            local_region_codes = batch_region_codes[local_rows]
             local_starts = batch_starts[local_rows]
         else:
             local_scores = batch_scores
             local_chrom_codes = np.broadcast_to(
                 batch_chrom_codes[:, None], local_scores.shape
             )
+            local_region_codes = np.broadcast_to(
+                batch_region_codes[:, None], local_scores.shape
+            )
             local_starts = np.broadcast_to(batch_starts[:, None], local_scores.shape)
 
         scores = np.concatenate([self.scores, local_scores], axis=0)
         chrom_codes = np.concatenate([self.chrom_codes, local_chrom_codes], axis=0)
+        region_codes = np.concatenate([self.region_codes, local_region_codes], axis=0)
         starts = np.concatenate([self.starts, local_starts], axis=0)
 
         keep_rows = np.argpartition(scores, -self.k, axis=0)[-self.k:, :]
         self.scores = np.take_along_axis(scores, keep_rows, axis=0)
         self.chrom_codes = np.take_along_axis(chrom_codes, keep_rows, axis=0)
+        self.region_codes = np.take_along_axis(region_codes, keep_rows, axis=0)
         self.starts = np.take_along_axis(starts, keep_rows, axis=0)
 
 
@@ -255,22 +272,31 @@ def nms_indices(
 
 
 def read_regions(path: Path, max_regions: int | None) -> list[dict[str, object]]:
-    regions = pl.read_parquet(path).select("chrom", "start", "end", "strand", "seq")
+    regions = pl.read_parquet(path).select("chrom", "start", "end", "strand", "seq", "gene_id")
     regions = regions.with_columns(
         pl.col("chrom").cast(pl.Utf8),
         pl.col("start").cast(pl.Int64),
         pl.col("end").cast(pl.Int64),
         pl.col("strand").cast(pl.Utf8),
         pl.col("seq").cast(pl.Utf8),
+        pl.col("gene_id").cast(pl.Utf8),
     )
     if max_regions is not None:
         regions = regions.head(max_regions)
     return list(regions.iter_rows(named=True))
 
 
+def sequence_name_for_region(region: dict[str, object]) -> str:
+    return (
+        f"{region['gene_id']}|chr={region['chrom']}|start={region['start']}|"
+        f"end={region['end']}|strand={region['strand']}"
+    )
+
+
 def add_windows_for_region(
     *,
     region: dict[str, object],
+    region_code: int,
     half_window: int,
     scan_stride: int,
     sequence_orientation: str,
@@ -278,6 +304,7 @@ def add_windows_for_region(
     chrom_names: list[str],
     windows: list[str],
     chrom_codes: list[int],
+    region_codes: list[int],
     starts: list[int],
 ) -> None:
     chrom = str(region["chrom"])
@@ -309,6 +336,7 @@ def add_windows_for_region(
 
         windows.append(seq[left:right])
         chrom_codes.append(chrom_code)
+        region_codes.append(region_code)
         starts.append(center)
 
 
@@ -337,20 +365,29 @@ def write_outputs(
     topk: TopKBuffer,
     tf_names: list[str],
     chrom_names: list[str],
+    region_records: list[dict[str, object]],
     nms_radius_bp: int,
     top_k_per_tf: int,
+    window_size: int,
+    feature_rank_method: str,
 ) -> None:
     prediction_frames = []
     feature_scores = []
+    half_window = window_size // 2
 
     for feature_idx, tf_name in enumerate(tf_names):
         scores = topk.scores[:, feature_idx]
-        valid = np.isfinite(scores) & (topk.chrom_codes[:, feature_idx] >= 0)
+        valid = (
+            np.isfinite(scores)
+            & (topk.chrom_codes[:, feature_idx] >= 0)
+            & (topk.region_codes[:, feature_idx] >= 0)
+        )
         if not valid.any():
             continue
 
         starts_raw = topk.starts[valid, feature_idx]
         chrom_codes_raw = topk.chrom_codes[valid, feature_idx]
+        region_codes_raw = topk.region_codes[valid, feature_idx]
         scores_raw = scores[valid]
         keep = nms_indices(
             chrom_codes=chrom_codes_raw,
@@ -361,8 +398,21 @@ def write_outputs(
         )
         starts = starts_raw[keep]
         chrom_codes = chrom_codes_raw[keep]
+        region_codes = region_codes_raw[keep]
         sorted_scores = scores_raw[keep]
-        feature_scores.append((tf_name, float(sorted_scores[0])))
+        if feature_rank_method == "max-score":
+            feature_score = float(sorted_scores[0])
+        elif feature_rank_method == "mean-top-score":
+            feature_score = float(np.mean(sorted_scores))
+        elif feature_rank_method == "hit-count":
+            feature_score = float(len(sorted_scores))
+        elif feature_rank_method == "tf-name":
+            feature_score = 0.0
+        else:
+            raise ValueError(f"Unknown feature-rank method: {feature_rank_method}")
+        feature_scores.append((tf_name, feature_score))
+
+        regions = [region_records[int(code)] for code in region_codes]
 
         prediction_frames.append(
             pl.DataFrame(
@@ -373,6 +423,13 @@ def write_outputs(
                     "feature_idx": [tf_name] * len(starts),
                     "score": sorted_scores,
                     "strand": ["."] * len(starts),
+                    "gene_id": [str(region["gene_id"]) for region in regions],
+                    "sequence_name": [sequence_name_for_region(region) for region in regions],
+                    "region_start": [int(region["start"]) for region in regions],
+                    "region_end": [int(region["end"]) for region in regions],
+                    "region_strand": [str(region["strand"]) for region in regions],
+                    "window_start": starts - half_window,
+                    "window_end": starts + half_window + 1,
                 }
             )
         )
@@ -402,7 +459,12 @@ def write_outputs(
             schema=["feature_idx", "feature_score"],
             orient="row",
         )
-        .sort(["feature_score", "feature_idx"], descending=[True, False])
+        .sort(
+            ["feature_idx"]
+            if feature_rank_method == "tf-name"
+            else ["feature_score", "feature_idx"],
+            descending=[False] if feature_rank_method == "tf-name" else [True, False],
+        )
         .with_row_index("feature_rank", offset=1)
         .select("feature_idx", "feature_rank", "feature_score")
     )
@@ -467,6 +529,7 @@ def main() -> None:
 
     windows: list[str] = []
     chrom_codes: list[int] = []
+    region_codes: list[int] = []
     starts: list[int] = []
     n_scanned = 0
     half_window = window_size // 2
@@ -482,9 +545,11 @@ def main() -> None:
     print(f"Top K per TF:         {args.top_k_per_tf}")
     print(f"Pre-NMS candidates:   {candidate_k}")
     print(f"NMS radius bp:        {args.nms_radius_bp}")
+    print(f"Score mode:           {args.score_mode}")
+    print(f"Feature rank method:  {args.feature_rank_method}")
 
     def flush() -> None:
-        nonlocal windows, chrom_codes, starts, n_scanned
+        nonlocal windows, chrom_codes, region_codes, starts, n_scanned
         if not windows:
             return
         scores = score_batch(
@@ -497,16 +562,19 @@ def main() -> None:
         topk.update(
             scores,
             np.asarray(chrom_codes, dtype=np.int32),
+            np.asarray(region_codes, dtype=np.int32),
             np.asarray(starts, dtype=np.int64),
         )
         n_scanned += len(windows)
         windows = []
         chrom_codes = []
+        region_codes = []
         starts = []
 
-    for region in tqdm(regions, desc="Scanning regions"):
+    for region_code, region in enumerate(tqdm(regions, desc="Scanning regions")):
         add_windows_for_region(
             region=region,
+            region_code=region_code,
             half_window=half_window,
             scan_stride=args.scan_stride,
             sequence_orientation=sequence_orientation,
@@ -514,11 +582,13 @@ def main() -> None:
             chrom_names=chrom_names,
             windows=windows,
             chrom_codes=chrom_codes,
+            region_codes=region_codes,
             starts=starts,
         )
         while len(windows) >= args.batch_size:
             batch_windows = windows[: args.batch_size]
             batch_chrom_codes = chrom_codes[: args.batch_size]
+            batch_region_codes = region_codes[: args.batch_size]
             batch_starts = starts[: args.batch_size]
             scores = score_batch(
                 model=model,
@@ -530,11 +600,13 @@ def main() -> None:
             topk.update(
                 scores,
                 np.asarray(batch_chrom_codes, dtype=np.int32),
+                np.asarray(batch_region_codes, dtype=np.int32),
                 np.asarray(batch_starts, dtype=np.int64),
             )
             n_scanned += len(batch_windows)
             del windows[: args.batch_size]
             del chrom_codes[: args.batch_size]
+            del region_codes[: args.batch_size]
             del starts[: args.batch_size]
 
     flush()
@@ -546,8 +618,11 @@ def main() -> None:
         topk=topk,
         tf_names=[str(name) for name in tf_names],
         chrom_names=chrom_names,
+        region_records=regions,
         nms_radius_bp=args.nms_radius_bp,
         top_k_per_tf=args.top_k_per_tf,
+        window_size=window_size,
+        feature_rank_method=args.feature_rank_method,
     )
 
     metadata = {
@@ -561,6 +636,7 @@ def main() -> None:
         "candidate_k_per_tf": candidate_k,
         "nms_radius_bp": args.nms_radius_bp,
         "score_mode": args.score_mode,
+        "feature_rank_method": args.feature_rank_method,
         "n_scanned_windows": n_scanned,
         "n_tfs": len(tf_names),
         "model_config": {
