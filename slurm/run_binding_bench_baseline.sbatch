@@ -3,6 +3,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=02:00:00
+#SBATCH --partition=student_project
 #SBATCH --output=slurm/logs/binding-bench-%j.out
 #SBATCH --error=slurm/logs/binding-bench-%j.err
 

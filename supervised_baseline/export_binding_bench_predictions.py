@@ -12,9 +12,11 @@ from tqdm import tqdm
 try:
     from .dataset import DEFAULT_REGIONS_PATH
     from .model import MODEL_NAMES, build_model, parse_dilations
+    from .tf_embeddings import load_tf_embeddings
 except ImportError:
     from dataset import DEFAULT_REGIONS_PATH
     from model import MODEL_NAMES, build_model, parse_dilations
+    from tf_embeddings import load_tf_embeddings
 
 
 DEFAULT_PROJECT = Path("/s/project/ml4rg_students/2026/project15")
@@ -56,6 +58,29 @@ def parse_args() -> argparse.Namespace:
         "--dropout",
         type=float,
         help="Override dropout when reconstructing res_dilated_cnn.",
+    )
+    parser.add_argument(
+        "--num-heads",
+        type=int,
+        help="Override cross-attention head count when reconstructing transbind_lite.",
+    )
+    parser.add_argument(
+        "--tf-embeddings-path",
+        type=Path,
+        help="Override protein embeddings parquet for transbind_lite.",
+    )
+    parser.add_argument(
+        "--tf-embedding-key-column",
+        help="Override embedding table key column for transbind_lite.",
+    )
+    parser.add_argument(
+        "--tf-embedding-column",
+        help="Override embedding column for transbind_lite.",
+    )
+    parser.add_argument(
+        "--tf-name-map",
+        type=Path,
+        help="Override JSON mapping from checkpoint TF labels to embedding-table keys.",
     )
     parser.add_argument(
         "--predictions-out",
@@ -163,6 +188,35 @@ def resolve_model_config(
         if args.dilations is not None
         else saved_config.get("dilations", checkpoint_arg(checkpoint, "dilations", "1,2,4,8,16"))
     )
+    num_heads = args.num_heads or int(
+        saved_config.get("num_heads", checkpoint_arg(checkpoint, "num_heads", 8))
+    )
+    tf_embeddings_path = args.tf_embeddings_path
+    if tf_embeddings_path is None:
+        saved_path = saved_config.get(
+            "tf_embeddings_path", checkpoint_arg(checkpoint, "tf_embeddings_path", None)
+        )
+        tf_embeddings_path = Path(str(saved_path)) if saved_path else None
+    tf_embedding_key_column = (
+        args.tf_embedding_key_column
+        if args.tf_embedding_key_column is not None
+        else saved_config.get(
+            "tf_embedding_key_column",
+            checkpoint_arg(checkpoint, "tf_embedding_key_column", None),
+        )
+    )
+    tf_embedding_column = (
+        args.tf_embedding_column
+        if args.tf_embedding_column is not None
+        else saved_config.get(
+            "tf_embedding_column",
+            checkpoint_arg(checkpoint, "tf_embedding_column", "emb"),
+        )
+    )
+    tf_name_map = args.tf_name_map
+    if tf_name_map is None:
+        saved_map = saved_config.get("tf_name_map", checkpoint_arg(checkpoint, "tf_name_map", None))
+        tf_name_map = Path(str(saved_map)) if saved_map else None
 
     return {
         "model_name": model_name,
@@ -170,6 +224,11 @@ def resolve_model_config(
         "kernel_size": kernel_size,
         "dropout": float(dropout),
         "dilations": parse_dilations(dilations_raw),
+        "num_heads": num_heads,
+        "tf_embeddings_path": tf_embeddings_path,
+        "tf_embedding_key_column": tf_embedding_key_column,
+        "tf_embedding_column": tf_embedding_column,
+        "tf_name_map": tf_name_map,
     }
 
 
@@ -519,13 +578,30 @@ def main() -> None:
         raise ValueError(f"Unsupported sequence orientation: {sequence_orientation}")
 
     model_config = resolve_model_config(args, checkpoint)
+    tf_embeddings = None
+    if model_config["model_name"] == "transbind_lite":
+        tf_embeddings_path = model_config["tf_embeddings_path"]
+        if tf_embeddings_path is None:
+            raise ValueError(
+                "Checkpoint uses transbind_lite but no TF embeddings path was saved. "
+                "Pass --tf-embeddings-path."
+            )
+        tf_embeddings, _ = load_tf_embeddings(
+            tf_embeddings_path,
+            tf_names,
+            key_column=model_config["tf_embedding_key_column"],
+            embedding_column=str(model_config["tf_embedding_column"]),
+            name_mapping_path=model_config["tf_name_map"],
+        )
     model = build_model(
         str(model_config["model_name"]),
         n_tfs=len(tf_names),
+        tf_embeddings=tf_embeddings,
         hidden_channels=int(model_config["hidden_channels"]),
         kernel_size=int(model_config["kernel_size"]),
         dropout=float(model_config["dropout"]),
         dilations=model_config["dilations"],
+        num_heads=int(model_config["num_heads"]),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -655,6 +731,12 @@ def main() -> None:
         "model_config": {
             **model_config,
             "dilations": list(model_config["dilations"]),
+            "tf_embeddings_path": (
+                str(model_config["tf_embeddings_path"])
+                if model_config["tf_embeddings_path"]
+                else None
+            ),
+            "tf_name_map": str(model_config["tf_name_map"]) if model_config["tf_name_map"] else None,
         },
     }
     metadata_path = args.predictions_out.with_suffix(".metadata.json")

@@ -109,7 +109,78 @@ class ResDilatedCNN(nn.Module):
         return self.classifier(x)
 
 
-MODEL_NAMES = ("small_cnn", "res_dilated_cnn")
+class TransBindLite(nn.Module):
+    """Protein-conditioned TF binding model.
+
+    The DNA trunk produces positional sequence features. Each fixed TF protein
+    embedding acts as a query over those positions, yielding one logit per TF.
+    """
+
+    def __init__(
+        self,
+        n_tfs: int,
+        tf_embeddings: torch.Tensor,
+        *,
+        hidden_channels: int = 320,
+        dropout: float = 0.1,
+        num_heads: int = 8,
+    ) -> None:
+        super().__init__()
+        if tf_embeddings.ndim != 2:
+            raise ValueError("tf_embeddings must have shape [n_tfs, embedding_dim]")
+        if tf_embeddings.shape[0] != n_tfs:
+            raise ValueError(
+                f"Expected {n_tfs} TF embeddings, got {tf_embeddings.shape[0]}"
+            )
+        if hidden_channels % num_heads != 0:
+            raise ValueError("hidden_channels must be divisible by num_heads")
+
+        self.register_buffer("tf_embeddings", tf_embeddings.float())
+        embedding_dim = int(tf_embeddings.shape[1])
+        self.dna_encoder = nn.Sequential(
+            nn.Conv1d(in_channels=4, out_channels=hidden_channels, kernel_size=15, padding=7),
+            nn.BatchNorm1d(hidden_channels),
+            nn.GELU(),
+            nn.MaxPool1d(kernel_size=2),
+            ResidualDilatedBlock(hidden_channels, kernel_size=7, dilation=1, dropout=dropout),
+            ResidualDilatedBlock(hidden_channels, kernel_size=7, dilation=2, dropout=dropout),
+            ResidualDilatedBlock(hidden_channels, kernel_size=7, dilation=4, dropout=dropout),
+        )
+        self.tf_projection = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=hidden_channels,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.norm = nn.LayerNorm(hidden_channels)
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dna = self.dna_encoder(x).transpose(1, 2)
+        global_dna = dna.mean(dim=1)
+
+        tf_query = self.tf_projection(self.tf_embeddings)
+        tf_query = tf_query.unsqueeze(0).expand(x.shape[0], -1, -1)
+        attended, _ = self.cross_attention(query=tf_query, key=dna, value=dna, need_weights=False)
+        attended = self.norm(attended + tf_query)
+
+        global_dna = global_dna.unsqueeze(1).expand(-1, attended.shape[1], -1)
+        logits = self.classifier(torch.cat([attended, global_dna], dim=-1)).squeeze(-1)
+        return logits
+
+
+MODEL_NAMES = ("small_cnn", "res_dilated_cnn", "transbind_lite")
 
 
 def parse_dilations(value: str | tuple[int, ...] | list[int]) -> tuple[int, ...]:
@@ -130,10 +201,12 @@ def build_model(
     model_name: str,
     *,
     n_tfs: int,
+    tf_embeddings: torch.Tensor | None = None,
     hidden_channels: int = 128,
     kernel_size: int = 7,
     dropout: float = 0.1,
     dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+    num_heads: int = 8,
 ) -> nn.Module:
     if model_name == "small_cnn":
         return smallCNN(n_tfs=n_tfs)
@@ -144,5 +217,15 @@ def build_model(
             kernel_size=kernel_size,
             dropout=dropout,
             dilations=dilations,
+        )
+    if model_name == "transbind_lite":
+        if tf_embeddings is None:
+            raise ValueError("transbind_lite requires tf_embeddings")
+        return TransBindLite(
+            n_tfs=n_tfs,
+            tf_embeddings=tf_embeddings,
+            hidden_channels=hidden_channels,
+            dropout=dropout,
+            num_heads=num_heads,
         )
     raise ValueError(f"Unknown model: {model_name!r}. Choose one of {MODEL_NAMES}.")

@@ -6,6 +6,7 @@
 #SBATCH --partition=student_project
 #SBATCH --output=slurm/logs/supervised-%j.out
 #SBATCH --error=slurm/logs/supervised-%j.err
+#SBATCH --gres=gpu:1
 
 set -euo pipefail
 
@@ -33,6 +34,11 @@ HIDDEN_CHANNELS="${HIDDEN_CHANNELS:-128}"
 KERNEL_SIZE="${KERNEL_SIZE:-7}"
 DILATIONS="${DILATIONS:-1,2,4,8,16}"
 DROPOUT="${DROPOUT:-0.1}"
+NUM_HEADS="${NUM_HEADS:-8}"
+TF_EMBEDDINGS_PATH="${TF_EMBEDDINGS_PATH:-}"
+TF_EMBEDDING_KEY_COLUMN="${TF_EMBEDDING_KEY_COLUMN:-}"
+TF_EMBEDDING_COLUMN="${TF_EMBEDDING_COLUMN:-emb}"
+TF_NAME_MAP="${TF_NAME_MAP:-}"
 EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
 LR="${LR:-0.001}"
@@ -75,6 +81,11 @@ echo "Hidden channels:      ${HIDDEN_CHANNELS}"
 echo "Kernel size:          ${KERNEL_SIZE}"
 echo "Dilations:            ${DILATIONS}"
 echo "Dropout:              ${DROPOUT}"
+echo "Num heads:            ${NUM_HEADS}"
+echo "TF embeddings:        ${TF_EMBEDDINGS_PATH:-<none>}"
+echo "TF embedding key:     ${TF_EMBEDDING_KEY_COLUMN:-<auto>}"
+echo "TF embedding column:  ${TF_EMBEDDING_COLUMN}"
+echo "TF name map:          ${TF_NAME_MAP:-<none>}"
 echo "Epochs:               ${EPOCHS}"
 echo "Batch size:           ${BATCH_SIZE}"
 echo "Device:               ${DEVICE}"
@@ -93,6 +104,7 @@ echo "Extra args:           ${EXTRA_ARGS}"
     --kernel-size "${KERNEL_SIZE}" \
     --dilations "${DILATIONS}" \
     --dropout "${DROPOUT}" \
+    --num-heads "${NUM_HEADS}" \
     --epochs "${EPOCHS}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \
@@ -102,6 +114,10 @@ echo "Extra args:           ${EXTRA_ARGS}"
     --device "${DEVICE}" \
     --sequence-orientation "${SEQUENCE_ORIENTATION}" \
     --save-every "${SAVE_EVERY}" \
+    ${TF_EMBEDDINGS_PATH:+--tf-embeddings-path "${TF_EMBEDDINGS_PATH}"} \
+    ${TF_EMBEDDING_KEY_COLUMN:+--tf-embedding-key-column "${TF_EMBEDDING_KEY_COLUMN}"} \
+    --tf-embedding-column "${TF_EMBEDDING_COLUMN}" \
+    ${TF_NAME_MAP:+--tf-name-map "${TF_NAME_MAP}"} \
     ${EXTRA_ARGS}
 
 echo "Supervised training finished."

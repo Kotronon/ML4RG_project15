@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Iterable, Literal
 
 import numpy as np
 import polars as pl
@@ -80,6 +80,7 @@ class BindingBenchWindowDataset(Dataset):
         sequence_orientation: SequenceOrientation = "strand-aware",
         negative_exclusion_bp: int | None = None,
         max_positive_windows: int | None = None,
+        tf_name_filter: Iterable[str] | None = None,
     ) -> None:
         if window_size <= 0 or window_size % 2 == 0:
             raise ValueError("window_size must be a positive odd integer")
@@ -96,7 +97,7 @@ class BindingBenchWindowDataset(Dataset):
         )
         self.rng = np.random.default_rng(seed)
 
-        self.sites = self._read_sites(min_sites_per_tf)
+        self.sites = self._read_sites(min_sites_per_tf, tf_name_filter)
         self.regions = self._read_regions()
         self.tf_names = self.sites["name"].unique().sort().to_list()
         self.tf_to_idx = {name: idx for idx, name in enumerate(self.tf_names)}
@@ -144,7 +145,11 @@ class BindingBenchWindowDataset(Dataset):
             "sequence_orientation": self.sequence_orientation,
         }
 
-    def _read_sites(self, min_sites_per_tf: int) -> pl.DataFrame:
+    def _read_sites(
+        self,
+        min_sites_per_tf: int,
+        tf_name_filter: Iterable[str] | None,
+    ) -> pl.DataFrame:
         sites = pl.read_parquet(self.sites_path)
         required = {"chrom", "start", "end", "strand", "name"}
         missing = required - set(sites.columns)
@@ -160,6 +165,9 @@ class BindingBenchWindowDataset(Dataset):
         )
         if min_sites_per_tf > 1:
             sites = sites.filter(pl.len().over("name") >= min_sites_per_tf)
+        if tf_name_filter is not None:
+            keep_names = {str(name).upper() for name in tf_name_filter}
+            sites = sites.filter(pl.col("name").str.to_uppercase().is_in(keep_names))
         if sites.is_empty():
             raise ValueError("No sites remain after filtering")
         return sites

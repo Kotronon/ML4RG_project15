@@ -14,9 +14,11 @@ from torch.utils.data import DataLoader
 try:
     from .dataset import BindingBenchWindowDataset, DEFAULT_REGIONS_PATH, DEFAULT_SITES_PATH
     from .model import MODEL_NAMES, build_model, parse_dilations
+    from .tf_embeddings import available_embedding_keys, load_tf_embeddings
 except ImportError:
     from dataset import BindingBenchWindowDataset, DEFAULT_REGIONS_PATH, DEFAULT_SITES_PATH
     from model import MODEL_NAMES, build_model, parse_dilations
+    from tf_embeddings import available_embedding_keys, load_tf_embeddings
 
 
 DEFAULT_MODEL_ROOT = Path(
@@ -86,7 +88,40 @@ def parse_args() -> argparse.Namespace:
         "--dropout",
         type=float,
         default=0.1,
-        help="Dropout probability for res_dilated_cnn.",
+        help="Dropout probability for res_dilated_cnn/transbind_lite.",
+    )
+    parser.add_argument(
+        "--num-heads",
+        type=int,
+        default=8,
+        help="Cross-attention head count for transbind_lite.",
+    )
+    parser.add_argument(
+        "--tf-embeddings-path",
+        type=Path,
+        help="Parquet file with one protein embedding row per TF for transbind_lite.",
+    )
+    parser.add_argument(
+        "--tf-embedding-key-column",
+        help="Column used to match dataset TF labels to embedding rows. Defaults to auto.",
+    )
+    parser.add_argument(
+        "--tf-embedding-column",
+        default="emb",
+        help="Column containing list-valued protein embeddings.",
+    )
+    parser.add_argument(
+        "--tf-name-map",
+        type=Path,
+        help="Optional JSON mapping from dataset TF label to embedding-table key.",
+    )
+    parser.add_argument(
+        "--drop-missing-tf-embeddings",
+        action="store_true",
+        help=(
+            "For transbind_lite, filter the training dataset to TF labels that have "
+            "protein embeddings instead of failing on missing labels."
+        ),
     )
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -155,6 +190,11 @@ def model_config_from_args(args: argparse.Namespace) -> dict[str, object]:
         "kernel_size": args.kernel_size,
         "dropout": args.dropout,
         "dilations": list(parse_dilations(args.dilations)),
+        "num_heads": args.num_heads,
+        "tf_embeddings_path": str(args.tf_embeddings_path) if args.tf_embeddings_path else None,
+        "tf_embedding_key_column": args.tf_embedding_key_column,
+        "tf_embedding_column": args.tf_embedding_column,
+        "tf_name_map": str(args.tf_name_map) if args.tf_name_map else None,
     }
 
 
@@ -246,6 +286,16 @@ def main() -> None:
     device = get_device(args.device)
     dilations = parse_dilations(args.dilations)
 
+    tf_name_filter = None
+    if args.model == "transbind_lite" and args.drop_missing_tf_embeddings:
+        if args.tf_embeddings_path is None:
+            raise ValueError("--tf-embeddings-path is required for --model transbind_lite")
+        tf_name_filter = available_embedding_keys(
+            args.tf_embeddings_path,
+            key_column=args.tf_embedding_key_column,
+            name_mapping_path=args.tf_name_map,
+        )
+
     dataset = BindingBenchWindowDataset(
         sites_path=args.sites_path,
         regions_path=args.regions_path,
@@ -256,10 +306,32 @@ def main() -> None:
         sequence_orientation=args.sequence_orientation,
         negative_exclusion_bp=args.negative_exclusion_bp,
         max_positive_windows=args.max_positive_windows,
+        tf_name_filter=tf_name_filter,
     )
     print("Dataset:", dataset.summary())
     print("Device:", device)
     print("Model:", args.model)
+
+    tf_embeddings = None
+    tf_embedding_metadata = None
+    if args.model == "transbind_lite":
+        if args.tf_embeddings_path is None:
+            raise ValueError("--tf-embeddings-path is required for --model transbind_lite")
+        tf_embeddings, tf_embedding_metadata = load_tf_embeddings(
+            args.tf_embeddings_path,
+            dataset.tf_names,
+            key_column=args.tf_embedding_key_column,
+            embedding_column=args.tf_embedding_column,
+            name_mapping_path=args.tf_name_map,
+        )
+        print(
+            "TF embeddings:",
+            {
+                "path": str(args.tf_embeddings_path),
+                "n_tfs": int(tf_embeddings.shape[0]),
+                "embedding_dim": int(tf_embeddings.shape[1]),
+            },
+        )
 
     loader = DataLoader(
         dataset,
@@ -272,10 +344,12 @@ def main() -> None:
     model = build_model(
         args.model,
         n_tfs=len(dataset.tf_names),
+        tf_embeddings=tf_embeddings,
         hidden_channels=args.hidden_channels,
         kernel_size=args.kernel_size,
         dropout=args.dropout,
         dilations=dilations,
+        num_heads=args.num_heads,
     ).to(device)
     print("Trainable parameters:", count_parameters(model))
     optimizer = torch.optim.AdamW(
@@ -299,6 +373,8 @@ def main() -> None:
     save_json(args.output_dir / "dataset_summary.json", dataset.summary())
     save_json(args.output_dir / "args.json", serializable_args(args))
     save_json(args.output_dir / "model_config.json", model_config_from_args(args))
+    if tf_embedding_metadata is not None:
+        save_json(args.output_dir / "tf_embedding_metadata.json", tf_embedding_metadata)
 
     best_loss = float("inf")
     history: list[dict[str, float | int]] = []
