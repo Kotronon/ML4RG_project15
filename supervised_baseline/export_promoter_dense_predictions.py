@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +21,7 @@ try:
     )
     from .export_binding_bench_predictions import TopKBuffer, nms_indices, sequence_name_for_region
     from .model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations
-    from .train_promoter_dense import prepare_x
+    from .train_promoter_dense import collate_promoter_batch, prepare_x
 except ImportError:
     from dataset import (
         BindingBenchPromoterEmbeddingDataset,
@@ -31,7 +32,7 @@ except ImportError:
     )
     from export_binding_bench_predictions import TopKBuffer, nms_indices, sequence_name_for_region
     from model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations
-    from train_promoter_dense import prepare_x
+    from train_promoter_dense import collate_promoter_batch, prepare_x
 
 
 DEFAULT_PROJECT = Path("/s/project/ml4rg_students/2026/project15")
@@ -98,6 +99,14 @@ def parse_args() -> argparse.Namespace:
         "--sequence-orientation",
         choices=("strand-aware", "genomic"),
         help="Defaults to the value saved in the training checkpoint.",
+    )
+    parser.add_argument(
+        "--include-terminal-atg",
+        action="store_true",
+        help=(
+            "Force export with the terminal ATG retained. By default, export "
+            "uses the checkpoint setting and trims ATG for promoter-only models."
+        ),
     )
     parser.add_argument("--max-regions", type=int)
     return parser.parse_args()
@@ -186,6 +195,15 @@ def resolve_export_config(
     sequence_orientation = str(
         args.sequence_orientation or saved_args.get("sequence_orientation", "strand-aware")
     )
+    if args.include_terminal_atg:
+        trim_terminal_atg = False
+    else:
+        trim_terminal_atg = bool(
+            saved_config.get(
+                "trim_terminal_atg",
+                not bool(saved_args.get("include_terminal_atg", False)),
+            )
+        )
 
     if input_mode == "embedding" and embeddings_path is None:
         raise ValueError(
@@ -207,6 +225,7 @@ def resolve_export_config(
         "embedding_key_column": embedding_key_column,
         "min_sites_per_tf": min_sites_per_tf,
         "sequence_orientation": sequence_orientation,
+        "trim_terminal_atg": trim_terminal_atg,
     }
 
 
@@ -217,6 +236,7 @@ def build_dataset(config: dict[str, object], max_regions: int | None):
         "min_sites_per_tf": int(config["min_sites_per_tf"]),
         "sequence_orientation": str(config["sequence_orientation"]),
         "max_regions": max_regions,
+        "trim_terminal_atg": bool(config["trim_terminal_atg"]),
     }
     if config["input_mode"] == "raw":
         return BindingBenchPromoterSequenceDataset(**common)
@@ -247,8 +267,8 @@ def record_to_region(record: PromoterRecord) -> dict[str, object]:
 
 def genomic_positions_for_record(record: PromoterRecord, sequence_orientation: str) -> np.ndarray:
     if sequence_orientation == "strand-aware" and record.strand == "-":
-        return np.arange(record.end - 1, record.start - 1, -1, dtype=np.int64)
-    return np.arange(record.start, record.end, dtype=np.int64)
+        return np.arange(record.model_end - 1, record.model_start - 1, -1, dtype=np.int64)
+    return np.arange(record.model_start, record.model_end, dtype=np.int64)
 
 
 def score_batch(
@@ -502,6 +522,10 @@ def main() -> None:
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
+        collate_fn=partial(
+            collate_promoter_batch,
+            input_mode=str(config["input_mode"]),
+        ),
     )
     n_scored_positions = 0
 
@@ -562,6 +586,7 @@ def main() -> None:
         "embedding_column": config["embedding_column"],
         "embedding_key_column": config["embedding_key_column"],
         "sequence_orientation": config["sequence_orientation"],
+        "trim_terminal_atg": config["trim_terminal_atg"],
         "top_k_per_tf": args.top_k_per_tf,
         "pre_nms_factor": args.pre_nms_factor,
         "candidate_k_per_tf": candidate_k,

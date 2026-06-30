@@ -35,6 +35,7 @@ EMBEDDING_KEY_COLUMN="${EMBEDDING_KEY_COLUMN:-}"
 MIN_SITES_PER_TF="${MIN_SITES_PER_TF:-15}"
 MAX_REGIONS="${MAX_REGIONS:-}"
 SEQUENCE_ORIENTATION="${SEQUENCE_ORIENTATION:-strand-aware}"
+INCLUDE_TERMINAL_ATG="${INCLUDE_TERMINAL_ATG:-false}"
 HIDDEN_CHANNELS="${HIDDEN_CHANNELS:-128}"
 KERNEL_SIZE="${KERNEL_SIZE:-7}"
 DILATIONS="${DILATIONS:-1,2,4,8,16}"
@@ -96,6 +97,7 @@ echo "Weight decay:         ${WEIGHT_DECAY}"
 echo "LR scheduler:         ${LR_SCHEDULER}"
 echo "Device:               ${DEVICE}"
 echo "Sequence orientation: ${SEQUENCE_ORIENTATION}"
+echo "Include terminal ATG: ${INCLUDE_TERMINAL_ATG}"
 echo "No pos weight:        ${NO_POS_WEIGHT}"
 echo "Extra args:           ${EXTRA_ARGS}"
 
@@ -112,6 +114,9 @@ if [[ -n "${MAX_REGIONS}" ]]; then
 fi
 if [[ "${NO_POS_WEIGHT}" == "true" ]]; then
     OPTIONAL_ARGS+=(--no-pos-weight)
+fi
+if [[ "${INCLUDE_TERMINAL_ATG}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--include-terminal-atg)
 fi
 
 "${PYTHON_BIN}" "${TRAIN_SCRIPT}" \

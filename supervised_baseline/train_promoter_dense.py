@@ -4,6 +4,7 @@ import argparse
 import json
 import random
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -81,6 +82,14 @@ def parse_args() -> argparse.Namespace:
         default="strand-aware",
     )
     parser.add_argument(
+        "--include-terminal-atg",
+        action="store_true",
+        help=(
+            "Keep the terminal ATG from upstream_ATG_1000 sequence mappers. "
+            "By default, dense promoter baselines trim it and train on 1000 bp promoters."
+        ),
+    )
+    parser.add_argument(
         "--model",
         choices=DENSE_MODEL_NAMES,
         default="dense_small_cnn",
@@ -152,6 +161,7 @@ def build_dataset(args: argparse.Namespace):
         "min_sites_per_tf": args.min_sites_per_tf,
         "sequence_orientation": args.sequence_orientation,
         "max_regions": args.max_regions,
+        "trim_terminal_atg": not args.include_terminal_atg,
     }
     if args.input_mode == "raw":
         return BindingBenchPromoterSequenceDataset(**common)
@@ -176,6 +186,61 @@ def prepare_x(x: torch.Tensor, input_mode: str) -> torch.Tensor:
     if input_mode == "embedding":
         return x.transpose(1, 2).contiguous()
     return x
+
+
+def collate_promoter_batch(
+    items: list[dict[str, object]],
+    input_mode: str,
+) -> dict[str, object]:
+    if not items:
+        raise ValueError("Cannot collate an empty batch")
+
+    y0 = items[0]["y"]
+    if not isinstance(y0, torch.Tensor):
+        raise TypeError("Dataset y must be a torch.Tensor")
+    max_len = max(int(item["y"].shape[-1]) for item in items)
+    n_tfs = int(y0.shape[0])
+
+    y_batch = torch.zeros((len(items), n_tfs, max_len), dtype=torch.float32)
+    mask_batch = torch.zeros((len(items), max_len), dtype=torch.bool)
+
+    if input_mode == "raw":
+        x0 = items[0]["x"]
+        if not isinstance(x0, torch.Tensor):
+            raise TypeError("Dataset x must be a torch.Tensor")
+        channels = int(x0.shape[0])
+        x_batch = torch.zeros((len(items), channels, max_len), dtype=torch.float32)
+        for idx, item in enumerate(items):
+            x = item["x"]
+            y = item["y"]
+            mask = item["mask"]
+            length = int(y.shape[-1])
+            x_batch[idx, :, :length] = x
+            y_batch[idx, :, :length] = y
+            mask_batch[idx, :length] = mask
+    elif input_mode == "embedding":
+        x0 = items[0]["x"]
+        if not isinstance(x0, torch.Tensor):
+            raise TypeError("Dataset x must be a torch.Tensor")
+        embedding_dim = int(x0.shape[-1])
+        x_batch = torch.zeros((len(items), max_len, embedding_dim), dtype=torch.float32)
+        for idx, item in enumerate(items):
+            x = item["x"]
+            y = item["y"]
+            mask = item["mask"]
+            length = int(y.shape[-1])
+            x_batch[idx, :length, :] = x
+            y_batch[idx, :, :length] = y
+            mask_batch[idx, :length] = mask
+    else:
+        raise ValueError(f"Unsupported input mode: {input_mode}")
+
+    return {
+        "x": x_batch,
+        "y": y_batch,
+        "mask": mask_batch,
+        "meta": [item["meta"] for item in items],
+    }
 
 
 def compute_dense_pos_weight(dataset, device: torch.device) -> torch.Tensor:
@@ -248,6 +313,7 @@ def model_config_from_args(args: argparse.Namespace, input_channels: int) -> dic
         "embeddings_path": str(args.embeddings_path) if args.embeddings_path else None,
         "embedding_column": args.embedding_column,
         "embedding_key_column": args.embedding_key_column,
+        "trim_terminal_atg": not args.include_terminal_atg,
     }
 
 
@@ -360,6 +426,7 @@ def main() -> None:
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
+        collate_fn=partial(collate_promoter_batch, input_mode=args.input_mode),
     )
 
     model = build_dense_model(

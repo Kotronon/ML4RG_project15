@@ -373,6 +373,8 @@ class PromoterRecord:
     strand: str
     gene_id: str
     sequence: str
+    model_start: int
+    model_end: int
     label_intervals: tuple[tuple[int, int, int], ...]
 
 
@@ -394,6 +396,7 @@ class BindingBenchPromoterBaseDataset(Dataset):
         sequence_orientation: SequenceOrientation = "strand-aware",
         tf_name_filter: Iterable[str] | None = None,
         max_regions: int | None = None,
+        trim_terminal_atg: bool = True,
     ) -> None:
         if sequence_orientation not in {"genomic", "strand-aware"}:
             raise ValueError(f"Unsupported sequence_orientation: {sequence_orientation}")
@@ -401,6 +404,7 @@ class BindingBenchPromoterBaseDataset(Dataset):
         self.sites_path = Path(sites_path)
         self.regions_path = Path(regions_path)
         self.sequence_orientation = sequence_orientation
+        self.trim_terminal_atg = trim_terminal_atg
 
         self.sites = self._read_sites(min_sites_per_tf, tf_name_filter)
         self.regions = self._read_regions()
@@ -443,6 +447,7 @@ class BindingBenchPromoterBaseDataset(Dataset):
 
     def summary(self) -> dict[str, object]:
         total_positions = sum(len(record.sequence) for record in self.records)
+        coordinate_positions = sum(self._coordinate_length(record) for record in self.records)
         positive_tf_positions = 0
         bound_promoters = 0
         for record in self.records:
@@ -456,34 +461,37 @@ class BindingBenchPromoterBaseDataset(Dataset):
             "n_bound_promoters": bound_promoters,
             "n_tfs": len(self.tf_names),
             "sequence_orientation": self.sequence_orientation,
+            "trim_terminal_atg": self.trim_terminal_atg,
             "total_positions": total_positions,
+            "coordinate_positions": coordinate_positions,
             "positive_tf_positions": positive_tf_positions,
         }
 
     def genomic_to_offset(self, region: dict[str, object], genomic_pos: int) -> int:
-        start = int(region["start"])
-        end = int(region["end"])
+        model_start, model_end = self._model_coordinate_span(region)
         strand = str(region["strand"])
 
-        if not (start <= genomic_pos < end):
-            raise ValueError(f"Position {genomic_pos} is outside region {start}-{end}")
+        if not (model_start <= genomic_pos < model_end):
+            raise ValueError(
+                f"Position {genomic_pos} is outside model span "
+                f"{model_start}-{model_end}"
+            )
 
         if self.sequence_orientation == "strand-aware" and strand == "-":
-            return end - genomic_pos - 1
-        return genomic_pos - start
+            return model_end - genomic_pos - 1
+        return genomic_pos - model_start
 
     def offset_to_genomic(self, region: dict[str, object], offset: int) -> int:
-        start = int(region["start"])
-        end = int(region["end"])
+        model_start, model_end = self._model_coordinate_span(region)
         strand = str(region["strand"])
-        length = end - start
+        length = model_end - model_start
 
         if not (0 <= offset < length):
             raise ValueError(f"Offset {offset} is outside region length {length}")
 
         if self.sequence_orientation == "strand-aware" and strand == "-":
-            return end - offset - 1
-        return start + offset
+            return model_end - offset - 1
+        return model_start + offset
 
     def _read_sites(
         self,
@@ -548,17 +556,17 @@ class BindingBenchPromoterBaseDataset(Dataset):
         records: list[PromoterRecord] = []
         for region_idx, region_row in enumerate(regions.iter_rows(named=True)):
             region = dict(region_row)
-            sequence = str(region["seq"])
+            sequence = self._model_sequence(region)
             region_start = int(region["start"])
             region_end = int(region["end"])
-            length = len(sequence)
-            genomic_length = region_end - region_start
-            if length != genomic_length:
+            model_start, model_end = self._model_coordinate_span(region)
+            if len(sequence) != model_end - model_start:
                 raise ValueError(
-                    "Promoter sequence length does not match genomic span for "
-                    f"row {region_idx}: len(seq)={length}, span={genomic_length}"
+                    "Promoter model sequence length does not match model span for "
+                    f"row {region_idx}: len(seq)={len(sequence)}, "
+                    f"span={model_end - model_start}, "
+                    f"raw_start={region_start}, raw_end={region_end}"
                 )
-
             intervals = self._label_intervals_for_region(region, sites_by_chrom)
             records.append(
                 PromoterRecord(
@@ -568,6 +576,8 @@ class BindingBenchPromoterBaseDataset(Dataset):
                     strand=str(region["strand"]),
                     gene_id=str(region["gene_id"]),
                     sequence=sequence,
+                    model_start=model_start,
+                    model_end=model_end,
                     label_intervals=tuple(intervals),
                 )
             )
@@ -579,20 +589,19 @@ class BindingBenchPromoterBaseDataset(Dataset):
         sites_by_chrom: dict[str, list[dict[str, object]]],
     ) -> list[tuple[int, int, int]]:
         chrom = str(region["chrom"])
-        region_start = int(region["start"])
-        region_end = int(region["end"])
+        model_start, model_end = self._model_coordinate_span(region)
         intervals: list[tuple[int, int, int]] = []
 
         for site in sites_by_chrom.get(chrom, []):
             site_start = int(site["start"])
             site_end = int(site["end"])
-            if site_end <= region_start:
+            if site_end <= model_start:
                 continue
-            if site_start >= region_end:
+            if site_start >= model_end:
                 break
 
-            overlap_start = max(region_start, site_start)
-            overlap_end = min(region_end, site_end)
+            overlap_start = max(model_start, site_start)
+            overlap_end = min(model_end, site_end)
             if overlap_end <= overlap_start:
                 continue
 
@@ -608,18 +617,17 @@ class BindingBenchPromoterBaseDataset(Dataset):
         genomic_start: int,
         genomic_end: int,
     ) -> tuple[int, int]:
-        region_start = int(region["start"])
-        region_end = int(region["end"])
+        model_start, model_end = self._model_coordinate_span(region)
         strand = str(region["strand"])
 
         if self.sequence_orientation == "strand-aware" and strand == "-":
-            lo = region_end - genomic_end
-            hi = region_end - genomic_start
+            lo = model_end - genomic_end
+            hi = model_end - genomic_start
         else:
-            lo = genomic_start - region_start
-            hi = genomic_end - region_start
+            lo = genomic_start - model_start
+            hi = genomic_end - model_start
 
-        length = region_end - region_start
+        length = model_end - model_start
         lo = max(0, min(length, lo))
         hi = max(0, min(length, hi))
         return lo, hi
@@ -631,13 +639,39 @@ class BindingBenchPromoterBaseDataset(Dataset):
         return labels
 
     @staticmethod
+    def _coordinate_length(record: PromoterRecord) -> int:
+        return min(len(record.sequence), max(0, record.model_end - record.model_start))
+
+    def _model_sequence(self, region: dict[str, object]) -> str:
+        sequence = str(region["seq"])
+        if self.trim_terminal_atg:
+            return sequence[:-3]
+        return sequence
+
+    def _model_coordinate_span(self, region: dict[str, object]) -> tuple[int, int]:
+        raw_start = int(region["start"])
+        raw_end_inclusive = int(region["end"])
+        raw_end_exclusive = raw_end_inclusive + 1
+        strand = str(region["strand"])
+
+        if not self.trim_terminal_atg:
+            return raw_start, raw_end_exclusive
+
+        if self.sequence_orientation == "strand-aware" and strand == "-":
+            return raw_start + 3, raw_end_exclusive
+        return raw_start, raw_end_exclusive - 3
+
+    @staticmethod
     def _position_mask(record: PromoterRecord) -> np.ndarray:
         valid_bases = {"A", "C", "G", "T", "a", "c", "g", "t"}
-        return np.fromiter(
+        base_mask = np.fromiter(
             (base in valid_bases for base in record.sequence),
             dtype=bool,
             count=len(record.sequence),
         )
+        coordinate_mask = np.zeros(len(record.sequence), dtype=bool)
+        coordinate_mask[: BindingBenchPromoterBaseDataset._coordinate_length(record)] = True
+        return base_mask & coordinate_mask
 
 
 class BindingBenchPromoterSequenceDataset(BindingBenchPromoterBaseDataset):
@@ -671,6 +705,7 @@ class BindingBenchPromoterEmbeddingDataset(BindingBenchPromoterBaseDataset):
         sequence_orientation: SequenceOrientation = "strand-aware",
         tf_name_filter: Iterable[str] | None = None,
         max_regions: int | None = None,
+        trim_terminal_atg: bool = True,
     ) -> None:
         self.embeddings_path = Path(embeddings_path)
         self.embedding_column = embedding_column
@@ -686,6 +721,7 @@ class BindingBenchPromoterEmbeddingDataset(BindingBenchPromoterBaseDataset):
             sequence_orientation=sequence_orientation,
             tf_name_filter=tf_name_filter,
             max_regions=max_regions,
+            trim_terminal_atg=trim_terminal_atg,
         )
         self._load_embeddings()
 
@@ -739,13 +775,13 @@ class BindingBenchPromoterEmbeddingDataset(BindingBenchPromoterBaseDataset):
 
     def _get_x(self, idx: int, record: PromoterRecord) -> torch.Tensor:
         if self._embedding_array is not None:
-            embedding = np.asarray(self._embedding_array[idx], dtype=np.float32)
+            embedding = self._embedding_array[idx]
         elif self._embedding_rows is not None:
-            embedding = np.asarray(self._embedding_rows[idx], dtype=np.float32)
+            embedding = np.asarray(self._embedding_rows[idx])
         elif self._embedding_by_key is not None:
             try:
                 embedding = np.asarray(
-                    self._embedding_by_key[record.gene_id], dtype=np.float32
+                    self._embedding_by_key[record.gene_id]
                 )
             except KeyError as exc:
                 raise KeyError(
@@ -759,6 +795,8 @@ class BindingBenchPromoterEmbeddingDataset(BindingBenchPromoterBaseDataset):
                 f"Expected position embeddings [L, D] for {record.gene_id}, "
                 f"got shape {embedding.shape}"
             )
+        if self.trim_terminal_atg and embedding.shape[0] == len(record.sequence) + 3:
+            embedding = embedding[:-3]
         if embedding.shape[0] != len(record.sequence):
             raise ValueError(
                 f"Embedding length mismatch for {record.gene_id}: "

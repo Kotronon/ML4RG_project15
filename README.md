@@ -33,10 +33,12 @@ to embedding-table keys.
 ## Promoter-level dense baselines
 
 These baselines train directly on 1000 bp promoters and predict a dense
-TF-by-position score map. The raw baseline uses one-hot DNA sequence; the
-embedding baseline expects precomputed per-position promoter embeddings in
-row-aligned `.npy` `[N, L, D]` format or a parquet column containing `[L, D]`
-arrays.
+TF-by-position score map. The default sequence mapper is
+`fungi_upstream_ATG_1000`, whose `seq` values are 1003 bp because they include
+the terminal ATG. Dense promoter training trims that terminal ATG by default.
+The raw baseline uses one-hot DNA sequence; the embedding baseline expects
+precomputed per-position promoter embeddings in row-aligned `.npy` `[N, L, D]`
+format or a parquet column containing `[L, D]` arrays.
 
 Submit all four baseline runs:
 
