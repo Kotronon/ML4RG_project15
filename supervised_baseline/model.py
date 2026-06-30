@@ -109,6 +109,78 @@ class ResDilatedCNN(nn.Module):
         return self.classifier(x)
 
 
+class DenseSmallCNN(nn.Module):
+    """Promoter-level CNN that emits one logit per TF and position."""
+
+    def __init__(
+        self,
+        n_tfs: int,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 128,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(input_channels, hidden_channels, kernel_size=15, padding=7),
+            nn.BatchNorm1d(hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=7, padding=3),
+            nn.BatchNorm1d(hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_channels, n_tfs, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class DenseResDilatedCNN(nn.Module):
+    """Promoter-level residual dilated CNN for dense TFBS scoring."""
+
+    def __init__(
+        self,
+        n_tfs: int,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 128,
+        kernel_size: int = 7,
+        dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv1d(input_channels, hidden_channels, kernel_size=15, padding=7),
+            nn.BatchNorm1d(hidden_channels),
+            nn.GELU(),
+        )
+        self.blocks = nn.ModuleList(
+            [
+                ResidualDilatedBlock(
+                    hidden_channels,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    dropout=dropout,
+                )
+                for dilation in dilations
+            ]
+        )
+        self.head = nn.Sequential(
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_channels, n_tfs, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        for block in self.blocks:
+            x = block(x)
+        return self.head(x)
+
+
 class TransBindLite(nn.Module):
     """Protein-conditioned TF binding model.
 
@@ -196,6 +268,7 @@ class TransBindLite(nn.Module):
 
 
 MODEL_NAMES = ("small_cnn", "res_dilated_cnn", "transbind_lite")
+DENSE_MODEL_NAMES = ("dense_small_cnn", "dense_res_dilated_cnn")
 
 
 def parse_dilations(value: str | tuple[int, ...] | list[int]) -> tuple[int, ...]:
@@ -251,3 +324,34 @@ def build_model(
             learned_tf_bias=transbind_tf_bias,
         )
     raise ValueError(f"Unknown model: {model_name!r}. Choose one of {MODEL_NAMES}.")
+
+
+def build_dense_model(
+    model_name: str,
+    *,
+    n_tfs: int,
+    input_channels: int,
+    hidden_channels: int = 128,
+    kernel_size: int = 7,
+    dropout: float = 0.1,
+    dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+) -> nn.Module:
+    if model_name == "dense_small_cnn":
+        return DenseSmallCNN(
+            n_tfs=n_tfs,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            dropout=dropout,
+        )
+    if model_name == "dense_res_dilated_cnn":
+        return DenseResDilatedCNN(
+            n_tfs=n_tfs,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            dilations=dilations,
+        )
+    raise ValueError(
+        f"Unknown dense model: {model_name!r}. Choose one of {DENSE_MODEL_NAMES}."
+    )
