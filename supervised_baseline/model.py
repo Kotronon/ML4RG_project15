@@ -122,8 +122,12 @@ class TransBindLite(nn.Module):
         tf_embeddings: torch.Tensor,
         *,
         hidden_channels: int = 320,
+        kernel_size: int = 7,
+        dilations: tuple[int, ...] = (1, 2, 4),
         dropout: float = 0.1,
         num_heads: int = 8,
+        use_max_pool: bool = True,
+        learned_tf_bias: bool = False,
     ) -> None:
         super().__init__()
         if tf_embeddings.ndim != 2:
@@ -137,15 +141,23 @@ class TransBindLite(nn.Module):
 
         self.register_buffer("tf_embeddings", tf_embeddings.float())
         embedding_dim = int(tf_embeddings.shape[1])
-        self.dna_encoder = nn.Sequential(
+        dna_layers: list[nn.Module] = [
             nn.Conv1d(in_channels=4, out_channels=hidden_channels, kernel_size=15, padding=7),
             nn.BatchNorm1d(hidden_channels),
             nn.GELU(),
-            nn.MaxPool1d(kernel_size=2),
-            ResidualDilatedBlock(hidden_channels, kernel_size=7, dilation=1, dropout=dropout),
-            ResidualDilatedBlock(hidden_channels, kernel_size=7, dilation=2, dropout=dropout),
-            ResidualDilatedBlock(hidden_channels, kernel_size=7, dilation=4, dropout=dropout),
+        ]
+        if use_max_pool:
+            dna_layers.append(nn.MaxPool1d(kernel_size=2))
+        dna_layers.extend(
+            ResidualDilatedBlock(
+                hidden_channels,
+                kernel_size=kernel_size,
+                dilation=dilation,
+                dropout=dropout,
+            )
+            for dilation in dilations
         )
+        self.dna_encoder = nn.Sequential(*dna_layers)
         self.tf_projection = nn.Sequential(
             nn.LayerNorm(embedding_dim),
             nn.Linear(embedding_dim, hidden_channels),
@@ -165,6 +177,7 @@ class TransBindLite(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_channels, 1),
         )
+        self.tf_bias = nn.Parameter(torch.zeros(n_tfs)) if learned_tf_bias else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dna = self.dna_encoder(x).transpose(1, 2)
@@ -177,6 +190,8 @@ class TransBindLite(nn.Module):
 
         global_dna = global_dna.unsqueeze(1).expand(-1, attended.shape[1], -1)
         logits = self.classifier(torch.cat([attended, global_dna], dim=-1)).squeeze(-1)
+        if self.tf_bias is not None:
+            logits = logits + self.tf_bias
         return logits
 
 
@@ -207,6 +222,9 @@ def build_model(
     dropout: float = 0.1,
     dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
     num_heads: int = 8,
+    transbind_dilations: tuple[int, ...] = (1, 2, 4),
+    transbind_use_max_pool: bool = True,
+    transbind_tf_bias: bool = False,
 ) -> nn.Module:
     if model_name == "small_cnn":
         return smallCNN(n_tfs=n_tfs)
@@ -225,7 +243,11 @@ def build_model(
             n_tfs=n_tfs,
             tf_embeddings=tf_embeddings,
             hidden_channels=hidden_channels,
+            kernel_size=kernel_size,
+            dilations=transbind_dilations,
             dropout=dropout,
             num_heads=num_heads,
+            use_max_pool=transbind_use_max_pool,
+            learned_tf_bias=transbind_tf_bias,
         )
     raise ValueError(f"Unknown model: {model_name!r}. Choose one of {MODEL_NAMES}.")

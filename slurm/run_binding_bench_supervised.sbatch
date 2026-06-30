@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=bb-supervised
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=12G
 #SBATCH --time=08:00:00
 #SBATCH --partition=student_project
 #SBATCH --gres=gpu:1

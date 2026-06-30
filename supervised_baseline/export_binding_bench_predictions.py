@@ -55,6 +55,10 @@ def parse_args() -> argparse.Namespace:
         help="Override comma-separated dilations when reconstructing res_dilated_cnn.",
     )
     parser.add_argument(
+        "--transbind-dilations",
+        help="Override comma-separated dilations when reconstructing transbind_lite.",
+    )
+    parser.add_argument(
         "--dropout",
         type=float,
         help="Override dropout when reconstructing res_dilated_cnn.",
@@ -81,6 +85,16 @@ def parse_args() -> argparse.Namespace:
         "--tf-name-map",
         type=Path,
         help="Override JSON mapping from checkpoint TF labels to embedding-table keys.",
+    )
+    parser.add_argument(
+        "--transbind-no-max-pool",
+        action="store_true",
+        help="Override checkpoint config and disable transbind_lite early max pooling.",
+    )
+    parser.add_argument(
+        "--transbind-tf-bias",
+        action="store_true",
+        help="Override checkpoint config and enable transbind_lite learned TF bias.",
     )
     parser.add_argument(
         "--predictions-out",
@@ -188,6 +202,32 @@ def resolve_model_config(
         if args.dilations is not None
         else saved_config.get("dilations", checkpoint_arg(checkpoint, "dilations", "1,2,4,8,16"))
     )
+    transbind_dilations_raw = (
+        args.transbind_dilations
+        if args.transbind_dilations is not None
+        else saved_config.get(
+            "transbind_dilations",
+            checkpoint_arg(checkpoint, "transbind_dilations", "1,2,4"),
+        )
+    )
+    if args.transbind_no_max_pool:
+        transbind_use_max_pool = False
+    else:
+        transbind_use_max_pool = bool(
+            saved_config.get(
+                "transbind_use_max_pool",
+                checkpoint_arg(checkpoint, "transbind_use_max_pool", True),
+            )
+        )
+    if args.transbind_tf_bias:
+        transbind_tf_bias = True
+    else:
+        transbind_tf_bias = bool(
+            saved_config.get(
+                "transbind_tf_bias",
+                checkpoint_arg(checkpoint, "transbind_tf_bias", False),
+            )
+        )
     num_heads = args.num_heads or int(
         saved_config.get("num_heads", checkpoint_arg(checkpoint, "num_heads", 8))
     )
@@ -224,6 +264,9 @@ def resolve_model_config(
         "kernel_size": kernel_size,
         "dropout": float(dropout),
         "dilations": parse_dilations(dilations_raw),
+        "transbind_dilations": parse_dilations(transbind_dilations_raw),
+        "transbind_use_max_pool": transbind_use_max_pool,
+        "transbind_tf_bias": transbind_tf_bias,
         "num_heads": num_heads,
         "tf_embeddings_path": tf_embeddings_path,
         "tf_embedding_key_column": tf_embedding_key_column,
@@ -602,6 +645,9 @@ def main() -> None:
         dropout=float(model_config["dropout"]),
         dilations=model_config["dilations"],
         num_heads=int(model_config["num_heads"]),
+        transbind_dilations=model_config["transbind_dilations"],
+        transbind_use_max_pool=bool(model_config["transbind_use_max_pool"]),
+        transbind_tf_bias=bool(model_config["transbind_tf_bias"]),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -731,6 +777,7 @@ def main() -> None:
         "model_config": {
             **model_config,
             "dilations": list(model_config["dilations"]),
+            "transbind_dilations": list(model_config["transbind_dilations"]),
             "tf_embeddings_path": (
                 str(model_config["tf_embeddings_path"])
                 if model_config["tf_embeddings_path"]

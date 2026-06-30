@@ -85,6 +85,11 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated residual block dilations for res_dilated_cnn.",
     )
     parser.add_argument(
+        "--transbind-dilations",
+        default="1,2,4",
+        help="Comma-separated residual block dilations for transbind_lite.",
+    )
+    parser.add_argument(
         "--dropout",
         type=float,
         default=0.1,
@@ -123,10 +128,52 @@ def parse_args() -> argparse.Namespace:
             "protein embeddings instead of failing on missing labels."
         ),
     )
+    parser.add_argument(
+        "--tf-name-filter-from-embeddings",
+        action="store_true",
+        help=(
+            "Filter any supervised model to TF labels present in the embedding table. "
+            "Useful for fair comparison against transbind_lite."
+        ),
+    )
+    parser.add_argument(
+        "--transbind-no-max-pool",
+        action="store_true",
+        help="Disable the early MaxPool1d layer in transbind_lite.",
+    )
+    parser.add_argument(
+        "--transbind-tf-bias",
+        action="store_true",
+        help="Add a learned per-TF bias term to transbind_lite logits.",
+    )
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--lr-scheduler",
+        choices=("none", "cosine", "plateau"),
+        default="none",
+        help="Optional learning-rate schedule.",
+    )
+    parser.add_argument(
+        "--min-lr",
+        type=float,
+        default=1e-5,
+        help="Minimum learning rate for cosine/plateau schedules.",
+    )
+    parser.add_argument(
+        "--plateau-patience",
+        type=int,
+        default=10,
+        help="Epochs without loss improvement before plateau LR decay.",
+    )
+    parser.add_argument(
+        "--plateau-factor",
+        type=float,
+        default=0.5,
+        help="Multiplicative LR decay factor for plateau scheduling.",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
@@ -190,6 +237,9 @@ def model_config_from_args(args: argparse.Namespace) -> dict[str, object]:
         "kernel_size": args.kernel_size,
         "dropout": args.dropout,
         "dilations": list(parse_dilations(args.dilations)),
+        "transbind_dilations": list(parse_dilations(args.transbind_dilations)),
+        "transbind_use_max_pool": not args.transbind_no_max_pool,
+        "transbind_tf_bias": args.transbind_tf_bias,
         "num_heads": args.num_heads,
         "tf_embeddings_path": str(args.tf_embeddings_path) if args.tf_embeddings_path else None,
         "tf_embedding_key_column": args.tf_embedding_key_column,
@@ -200,6 +250,33 @@ def model_config_from_args(args: argparse.Namespace) -> dict[str, object]:
 
 def count_parameters(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+
+
+def build_lr_scheduler(
+    args: argparse.Namespace,
+    optimizer: torch.optim.Optimizer,
+) -> torch.optim.lr_scheduler.LRScheduler | torch.optim.lr_scheduler.ReduceLROnPlateau | None:
+    if args.lr_scheduler == "none":
+        return None
+    if args.lr_scheduler == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=args.epochs,
+            eta_min=args.min_lr,
+        )
+    if args.lr_scheduler == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=args.plateau_factor,
+            patience=args.plateau_patience,
+            min_lr=args.min_lr,
+        )
+    raise ValueError(f"Unknown LR scheduler: {args.lr_scheduler}")
+
+
+def current_lr(optimizer: torch.optim.Optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"])
 
 
 def save_checkpoint(
@@ -287,9 +364,11 @@ def main() -> None:
     dilations = parse_dilations(args.dilations)
 
     tf_name_filter = None
-    if args.model == "transbind_lite" and args.drop_missing_tf_embeddings:
+    if args.drop_missing_tf_embeddings or args.tf_name_filter_from_embeddings:
         if args.tf_embeddings_path is None:
-            raise ValueError("--tf-embeddings-path is required for --model transbind_lite")
+            raise ValueError(
+                "--tf-embeddings-path is required when filtering TFs to embeddings"
+            )
         tf_name_filter = available_embedding_keys(
             args.tf_embeddings_path,
             key_column=args.tf_embedding_key_column,
@@ -350,6 +429,9 @@ def main() -> None:
         dropout=args.dropout,
         dilations=dilations,
         num_heads=args.num_heads,
+        transbind_dilations=parse_dilations(args.transbind_dilations),
+        transbind_use_max_pool=not args.transbind_no_max_pool,
+        transbind_tf_bias=args.transbind_tf_bias,
     ).to(device)
     print("Trainable parameters:", count_parameters(model))
     optimizer = torch.optim.AdamW(
@@ -357,6 +439,8 @@ def main() -> None:
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
+    scheduler = build_lr_scheduler(args, optimizer)
+    print("LR scheduler:", args.lr_scheduler)
     pos_weight = None if args.no_pos_weight else compute_pos_weight(dataset, device)
     if pos_weight is not None:
         print(
@@ -380,14 +464,22 @@ def main() -> None:
     history: list[dict[str, float | int]] = []
     for epoch in range(1, args.epochs + 1):
         stats = train_one_epoch(model, loader, optimizer, device, pos_weight, epoch)
-        history.append(asdict(stats))
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(stats.train_loss)
+        elif scheduler is not None:
+            scheduler.step()
+
+        stats_dict = asdict(stats)
+        stats_dict["lr"] = current_lr(optimizer)
+        history.append(stats_dict)
         print(
             f"epoch={stats.epoch:03d} "
             f"loss={stats.train_loss:.5f} "
             f"micro_p={stats.micro_precision:.4f} "
             f"micro_r={stats.micro_recall:.4f} "
             f"micro_f1={stats.micro_f1:.4f} "
-            f"pred_pos={stats.predicted_positive_rate:.5f}"
+            f"pred_pos={stats.predicted_positive_rate:.5f} "
+            f"lr={current_lr(optimizer):.6g}"
         )
 
         save_json(args.output_dir / "history.json", history)

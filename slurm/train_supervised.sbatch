@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=sup-cnn
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --mem=16G
 #SBATCH --time=08:00:00
 #SBATCH --partition=student_project
 #SBATCH --output=slurm/logs/supervised-%j.out
@@ -33,16 +33,24 @@ MIN_SITES_PER_TF="${MIN_SITES_PER_TF:-15}"
 HIDDEN_CHANNELS="${HIDDEN_CHANNELS:-128}"
 KERNEL_SIZE="${KERNEL_SIZE:-7}"
 DILATIONS="${DILATIONS:-1,2,4,8,16}"
+TRANSBIND_DILATIONS="${TRANSBIND_DILATIONS:-1,2,4}"
 DROPOUT="${DROPOUT:-0.1}"
 NUM_HEADS="${NUM_HEADS:-8}"
 TF_EMBEDDINGS_PATH="${TF_EMBEDDINGS_PATH:-}"
 TF_EMBEDDING_KEY_COLUMN="${TF_EMBEDDING_KEY_COLUMN:-}"
 TF_EMBEDDING_COLUMN="${TF_EMBEDDING_COLUMN:-emb}"
 TF_NAME_MAP="${TF_NAME_MAP:-}"
+TF_NAME_FILTER_FROM_EMBEDDINGS="${TF_NAME_FILTER_FROM_EMBEDDINGS:-false}"
+TRANSBIND_NO_MAX_POOL="${TRANSBIND_NO_MAX_POOL:-false}"
+TRANSBIND_TF_BIAS="${TRANSBIND_TF_BIAS:-false}"
 EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
 LR="${LR:-0.001}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0001}"
+LR_SCHEDULER="${LR_SCHEDULER:-none}"
+MIN_LR="${MIN_LR:-0.00001}"
+PLATEAU_PATIENCE="${PLATEAU_PATIENCE:-10}"
+PLATEAU_FACTOR="${PLATEAU_FACTOR:-0.5}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-auto}"
@@ -80,17 +88,36 @@ echo "Min sites per TF:     ${MIN_SITES_PER_TF}"
 echo "Hidden channels:      ${HIDDEN_CHANNELS}"
 echo "Kernel size:          ${KERNEL_SIZE}"
 echo "Dilations:            ${DILATIONS}"
+echo "TransBind dilations:  ${TRANSBIND_DILATIONS}"
 echo "Dropout:              ${DROPOUT}"
 echo "Num heads:            ${NUM_HEADS}"
 echo "TF embeddings:        ${TF_EMBEDDINGS_PATH:-<none>}"
 echo "TF embedding key:     ${TF_EMBEDDING_KEY_COLUMN:-<auto>}"
 echo "TF embedding column:  ${TF_EMBEDDING_COLUMN}"
 echo "TF name map:          ${TF_NAME_MAP:-<none>}"
+echo "Filter TFs to emb:    ${TF_NAME_FILTER_FROM_EMBEDDINGS}"
+echo "TransBind no pool:    ${TRANSBIND_NO_MAX_POOL}"
+echo "TransBind TF bias:    ${TRANSBIND_TF_BIAS}"
 echo "Epochs:               ${EPOCHS}"
 echo "Batch size:           ${BATCH_SIZE}"
+echo "LR:                   ${LR}"
+echo "Weight decay:         ${WEIGHT_DECAY}"
+echo "LR scheduler:         ${LR_SCHEDULER}"
+echo "Min LR:               ${MIN_LR}"
 echo "Device:               ${DEVICE}"
 echo "Sequence orientation: ${SEQUENCE_ORIENTATION}"
 echo "Extra args:           ${EXTRA_ARGS}"
+
+OPTIONAL_ARGS=()
+if [[ "${TF_NAME_FILTER_FROM_EMBEDDINGS}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--tf-name-filter-from-embeddings)
+fi
+if [[ "${TRANSBIND_NO_MAX_POOL}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--transbind-no-max-pool)
+fi
+if [[ "${TRANSBIND_TF_BIAS}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--transbind-tf-bias)
+fi
 
 "${PYTHON_BIN}" "${TRAIN_SCRIPT}" \
     --sites-path "${SITES_PATH}" \
@@ -103,12 +130,17 @@ echo "Extra args:           ${EXTRA_ARGS}"
     --hidden-channels "${HIDDEN_CHANNELS}" \
     --kernel-size "${KERNEL_SIZE}" \
     --dilations "${DILATIONS}" \
+    --transbind-dilations "${TRANSBIND_DILATIONS}" \
     --dropout "${DROPOUT}" \
     --num-heads "${NUM_HEADS}" \
     --epochs "${EPOCHS}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \
     --weight-decay "${WEIGHT_DECAY}" \
+    --lr-scheduler "${LR_SCHEDULER}" \
+    --min-lr "${MIN_LR}" \
+    --plateau-patience "${PLATEAU_PATIENCE}" \
+    --plateau-factor "${PLATEAU_FACTOR}" \
     --num-workers "${NUM_WORKERS}" \
     --seed "${SEED}" \
     --device "${DEVICE}" \
@@ -118,6 +150,7 @@ echo "Extra args:           ${EXTRA_ARGS}"
     ${TF_EMBEDDING_KEY_COLUMN:+--tf-embedding-key-column "${TF_EMBEDDING_KEY_COLUMN}"} \
     --tf-embedding-column "${TF_EMBEDDING_COLUMN}" \
     ${TF_NAME_MAP:+--tf-name-map "${TF_NAME_MAP}"} \
+    "${OPTIONAL_ARGS[@]}" \
     ${EXTRA_ARGS}
 
 echo "Supervised training finished."
