@@ -31,6 +31,12 @@ OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT}/working/supervised_baseline/models/promoter
 EMBEDDINGS_PATH="${EMBEDDINGS_PATH:-}"
 EMBEDDING_COLUMN="${EMBEDDING_COLUMN:-emb}"
 EMBEDDING_KEY_COLUMN="${EMBEDDING_KEY_COLUMN:-}"
+TF_EMBEDDINGS_PATH="${TF_EMBEDDINGS_PATH:-}"
+TF_EMBEDDING_KEY_COLUMN="${TF_EMBEDDING_KEY_COLUMN:-}"
+TF_EMBEDDING_COLUMN="${TF_EMBEDDING_COLUMN:-emb}"
+TF_NAME_MAP="${TF_NAME_MAP:-}"
+DROP_MISSING_TF_EMBEDDINGS="${DROP_MISSING_TF_EMBEDDINGS:-false}"
+TF_NAME_FILTER_FROM_EMBEDDINGS="${TF_NAME_FILTER_FROM_EMBEDDINGS:-false}"
 
 MIN_SITES_PER_TF="${MIN_SITES_PER_TF:-15}"
 MAX_REGIONS="${MAX_REGIONS:-}"
@@ -59,6 +65,11 @@ VAL_FRACTION="${VAL_FRACTION:-0.1}"
 VAL_CHROMS="${VAL_CHROMS:-}"
 TEST_CHROMS="${TEST_CHROMS:-}"
 EVAL_EVERY="${EVAL_EVERY:-1}"
+TF_SPLIT_MODE="${TF_SPLIT_MODE:-none}"
+TF_SPLIT_PATH="${TF_SPLIT_PATH:-}"
+TF_SPLIT_OUT="${TF_SPLIT_OUT:-}"
+TF_TRAIN_FRACTION="${TF_TRAIN_FRACTION:-0.7}"
+TF_VAL_FRACTION="${TF_VAL_FRACTION:-0.15}"
 NO_POS_WEIGHT="${NO_POS_WEIGHT:-false}"
 SAVE_EVERY="${SAVE_EVERY:-10}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
@@ -93,6 +104,12 @@ echo "Input mode:           ${INPUT_MODE}"
 echo "Embeddings:           ${EMBEDDINGS_PATH:-<none>}"
 echo "Embedding column:     ${EMBEDDING_COLUMN}"
 echo "Embedding key column: ${EMBEDDING_KEY_COLUMN:-<row-aligned>}"
+echo "TF embeddings:        ${TF_EMBEDDINGS_PATH:-<none>}"
+echo "TF embedding key:     ${TF_EMBEDDING_KEY_COLUMN:-<auto>}"
+echo "TF embedding column:  ${TF_EMBEDDING_COLUMN}"
+echo "TF name map:          ${TF_NAME_MAP:-<none>}"
+echo "Drop missing TF emb:  ${DROP_MISSING_TF_EMBEDDINGS}"
+echo "Filter TFs to emb:    ${TF_NAME_FILTER_FROM_EMBEDDINGS}"
 echo "Model:                ${MODEL}"
 echo "Hidden channels:      ${HIDDEN_CHANNELS}"
 echo "Kernel size:          ${KERNEL_SIZE}"
@@ -112,6 +129,11 @@ echo "Val fraction:         ${VAL_FRACTION}"
 echo "Val chroms:           ${VAL_CHROMS:-<none>}"
 echo "Test chroms:          ${TEST_CHROMS:-<none>}"
 echo "Eval every:           ${EVAL_EVERY}"
+echo "TF split mode:        ${TF_SPLIT_MODE}"
+echo "TF split path:        ${TF_SPLIT_PATH:-<none>}"
+echo "TF split out:         ${TF_SPLIT_OUT:-<output-dir>/tf_split.json}"
+echo "TF train fraction:    ${TF_TRAIN_FRACTION}"
+echo "TF val fraction:      ${TF_VAL_FRACTION}"
 echo "Sequence orientation: ${SEQUENCE_ORIENTATION}"
 echo "Include terminal ATG: ${INCLUDE_TERMINAL_ATG}"
 echo "No pos weight:        ${NO_POS_WEIGHT}"
@@ -125,6 +147,24 @@ if [[ "${INPUT_MODE}" == "embedding" ]]; then
         OPTIONAL_ARGS+=(--embedding-key-column "${EMBEDDING_KEY_COLUMN}")
     fi
 fi
+if [[ -n "${TF_EMBEDDINGS_PATH}" ]]; then
+    OPTIONAL_ARGS+=(--tf-embeddings-path "${TF_EMBEDDINGS_PATH}")
+fi
+if [[ -n "${TF_EMBEDDING_KEY_COLUMN}" ]]; then
+    OPTIONAL_ARGS+=(--tf-embedding-key-column "${TF_EMBEDDING_KEY_COLUMN}")
+fi
+if [[ -n "${TF_EMBEDDING_COLUMN}" ]]; then
+    OPTIONAL_ARGS+=(--tf-embedding-column "${TF_EMBEDDING_COLUMN}")
+fi
+if [[ -n "${TF_NAME_MAP}" ]]; then
+    OPTIONAL_ARGS+=(--tf-name-map "${TF_NAME_MAP}")
+fi
+if [[ "${DROP_MISSING_TF_EMBEDDINGS}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--drop-missing-tf-embeddings)
+fi
+if [[ "${TF_NAME_FILTER_FROM_EMBEDDINGS}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--tf-name-filter-from-embeddings)
+fi
 if [[ -n "${MAX_REGIONS}" ]]; then
     OPTIONAL_ARGS+=(--max-regions "${MAX_REGIONS}")
 fi
@@ -133,6 +173,12 @@ if [[ -n "${PROMOTER_SPLIT_PATH}" ]]; then
 fi
 if [[ -n "${PROMOTER_SPLIT_OUT}" ]]; then
     OPTIONAL_ARGS+=(--promoter-split-out "${PROMOTER_SPLIT_OUT}")
+fi
+if [[ -n "${TF_SPLIT_PATH}" ]]; then
+    OPTIONAL_ARGS+=(--tf-split-path "${TF_SPLIT_PATH}")
+fi
+if [[ -n "${TF_SPLIT_OUT}" ]]; then
+    OPTIONAL_ARGS+=(--tf-split-out "${TF_SPLIT_OUT}")
 fi
 if [[ "${NO_POS_WEIGHT}" == "true" ]]; then
     OPTIONAL_ARGS+=(--no-pos-weight)
@@ -170,6 +216,9 @@ fi
     --val-chroms "${VAL_CHROMS}" \
     --test-chroms "${TEST_CHROMS}" \
     --eval-every "${EVAL_EVERY}" \
+    --tf-split-mode "${TF_SPLIT_MODE}" \
+    --tf-train-fraction "${TF_TRAIN_FRACTION}" \
+    --tf-val-fraction "${TF_VAL_FRACTION}" \
     --save-every "${SAVE_EVERY}" \
     "${OPTIONAL_ARGS[@]}" \
     ${EXTRA_ARGS}

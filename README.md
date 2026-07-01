@@ -85,6 +85,28 @@ OUTPUT_DIR=/s/project/ml4rg_students/2026/project15/working/supervised_baseline/
 sbatch slurm/train_promoter_dense.sbatch
 ```
 
+Train a first protein-conditioned dense model. This uses the same promoter
+holdout infrastructure and additionally creates a random TF train/val/test
+split. Training loss is computed only on train TFs; validation is computed on
+validation promoters crossed with validation TFs.
+
+```bash
+INPUT_MODE=embedding \
+EMBEDDINGS_PATH=/s/project/ml4rg_students/2026/project15/raw/embeddings/other_models/specieslm_v1/_saccharomyces_cerevisiae/embs_ds_fungi_upstream_ATG_1000_l11.npy \
+TF_EMBEDDINGS_PATH=/s/project/ml4rg_students/2026/project15/working/protein_embeddings/scer_esm2_tf_emb.parquet \
+TF_EMBEDDING_KEY_COLUMN=gene \
+DROP_MISSING_TF_EMBEDDINGS=true \
+MODEL=dense_protein_res_dilated_cnn \
+PROMOTER_SPLIT_MODE=chromosome \
+VAL_CHROMS=VII \
+TEST_CHROMS=VIII,IX \
+TF_SPLIT_MODE=random \
+TF_TRAIN_FRACTION=0.7 \
+TF_VAL_FRACTION=0.15 \
+OUTPUT_DIR=/s/project/ml4rg_students/2026/project15/working/supervised_baseline/models/promoter_specieslm_l11_dense_protein_res_dilated_cnn_chr_tf_random \
+sbatch slurm/train_promoter_dense.sbatch
+```
+
 Evaluate a trained dense promoter checkpoint with Binding Bench:
 
 ```bash

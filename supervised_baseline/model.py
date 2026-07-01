@@ -181,6 +181,95 @@ class DenseResDilatedCNN(nn.Module):
         return self.head(x)
 
 
+class DenseProteinResDilatedCNN(nn.Module):
+    """Dense TFBS scorer conditioned on fixed TF protein embeddings.
+
+    The DNA trunk is intentionally close to ``DenseResDilatedCNN``. Instead of
+    learning one independent output channel per TF, the model projects DNA
+    positions and TF protein embeddings into a shared space and scores them with
+    a shared compatibility function. This makes held-out TF evaluation
+    meaningful: unseen TFs can still be scored through their protein embedding.
+    """
+
+    supports_tf_indices = True
+
+    def __init__(
+        self,
+        n_tfs: int,
+        tf_embeddings: torch.Tensor,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 128,
+        kernel_size: int = 7,
+        dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        if tf_embeddings.ndim != 2:
+            raise ValueError("tf_embeddings must have shape [n_tfs, embedding_dim]")
+        if tf_embeddings.shape[0] != n_tfs:
+            raise ValueError(
+                f"Expected {n_tfs} TF embeddings, got {tf_embeddings.shape[0]}"
+            )
+
+        self.register_buffer("tf_embeddings", tf_embeddings.float())
+        embedding_dim = int(tf_embeddings.shape[1])
+        self.stem = nn.Sequential(
+            nn.Conv1d(input_channels, hidden_channels, kernel_size=15, padding=7),
+            nn.BatchNorm1d(hidden_channels),
+            nn.GELU(),
+        )
+        self.blocks = nn.ModuleList(
+            [
+                ResidualDilatedBlock(
+                    hidden_channels,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    dropout=dropout,
+                )
+                for dilation in dilations
+            ]
+        )
+        self.dna_projection = nn.Sequential(
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+        )
+        self.tf_projection = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels),
+        )
+        self.dna_bias = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+        self.tf_bias = nn.Linear(hidden_channels, 1)
+        self.score_scale = hidden_channels ** -0.5
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        tf_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        dna = self.stem(x)
+        for block in self.blocks:
+            dna = block(dna)
+
+        dna_features = self.dna_projection(dna)
+        tf_embeddings = self.tf_embeddings
+        if tf_indices is not None:
+            tf_embeddings = tf_embeddings.index_select(0, tf_indices)
+        tf_features = self.tf_projection(tf_embeddings)
+
+        logits = torch.einsum("bcl,tc->btl", dna_features, tf_features)
+        logits = logits * self.score_scale
+        logits = logits + self.dna_bias(dna)
+        logits = logits + self.tf_bias(tf_features).view(1, -1, 1)
+        return logits
+
+
 class TransBindLite(nn.Module):
     """Protein-conditioned TF binding model.
 
@@ -268,7 +357,11 @@ class TransBindLite(nn.Module):
 
 
 MODEL_NAMES = ("small_cnn", "res_dilated_cnn", "transbind_lite")
-DENSE_MODEL_NAMES = ("dense_small_cnn", "dense_res_dilated_cnn")
+DENSE_MODEL_NAMES = (
+    "dense_small_cnn",
+    "dense_res_dilated_cnn",
+    "dense_protein_res_dilated_cnn",
+)
 
 
 def parse_dilations(value: str | tuple[int, ...] | list[int]) -> tuple[int, ...]:
@@ -331,6 +424,7 @@ def build_dense_model(
     *,
     n_tfs: int,
     input_channels: int,
+    tf_embeddings: torch.Tensor | None = None,
     hidden_channels: int = 128,
     kernel_size: int = 7,
     dropout: float = 0.1,
@@ -346,6 +440,18 @@ def build_dense_model(
     if model_name == "dense_res_dilated_cnn":
         return DenseResDilatedCNN(
             n_tfs=n_tfs,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            dilations=dilations,
+        )
+    if model_name == "dense_protein_res_dilated_cnn":
+        if tf_embeddings is None:
+            raise ValueError("dense_protein_res_dilated_cnn requires tf_embeddings")
+        return DenseProteinResDilatedCNN(
+            n_tfs=n_tfs,
+            tf_embeddings=tf_embeddings,
             input_channels=input_channels,
             hidden_channels=hidden_channels,
             kernel_size=kernel_size,

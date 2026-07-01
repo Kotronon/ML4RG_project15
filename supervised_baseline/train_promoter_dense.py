@@ -29,6 +29,15 @@ try:
         save_promoter_split,
         split_indices,
     )
+    from .tf_embeddings import available_embedding_keys, load_tf_embeddings
+    from .tf_splits import (
+        load_tf_split,
+        make_all_train_tf_split,
+        make_random_tf_split,
+        normalize_tf_split,
+        save_tf_split,
+        tf_split_indices,
+    )
 except ImportError:
     from dataset import (
         BindingBenchPromoterEmbeddingDataset,
@@ -45,6 +54,15 @@ except ImportError:
         normalize_promoter_split,
         save_promoter_split,
         split_indices,
+    )
+    from tf_embeddings import available_embedding_keys, load_tf_embeddings
+    from tf_splits import (
+        load_tf_split,
+        make_all_train_tf_split,
+        make_random_tf_split,
+        normalize_tf_split,
+        save_tf_split,
+        tf_split_indices,
     )
 
 
@@ -101,6 +119,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embedding-key-column",
         help="Optional parquet key column. If omitted, embeddings are row-aligned.",
+    )
+    parser.add_argument(
+        "--tf-embeddings-path",
+        type=Path,
+        help="Parquet file with one protein embedding row per TF for dense protein models.",
+    )
+    parser.add_argument(
+        "--tf-embedding-key-column",
+        help="Column used to match dataset TF labels to protein embedding rows. Defaults to auto.",
+    )
+    parser.add_argument(
+        "--tf-embedding-column",
+        default="emb",
+        help="Column containing list-valued TF protein embeddings.",
+    )
+    parser.add_argument(
+        "--tf-name-map",
+        type=Path,
+        help="Optional JSON mapping from dataset TF label to embedding-table key.",
+    )
+    parser.add_argument(
+        "--drop-missing-tf-embeddings",
+        action="store_true",
+        help=(
+            "For dense protein models, filter the dataset to TF labels that have "
+            "protein embeddings instead of failing on missing labels."
+        ),
+    )
+    parser.add_argument(
+        "--tf-name-filter-from-embeddings",
+        action="store_true",
+        help=(
+            "Filter any dense model to TF labels present in the protein embedding "
+            "table. Useful for fair DNA-only comparisons against protein models."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -184,6 +237,27 @@ def parse_args() -> argparse.Namespace:
         help="Evaluate validation split every N epochs. Use 0 to disable epoch validation.",
     )
     parser.add_argument(
+        "--tf-split-mode",
+        choices=("none", "random"),
+        default="none",
+        help=(
+            "Split TF labels into train/val/test subsets. Meaningful only for "
+            "dense_protein_res_dilated_cnn."
+        ),
+    )
+    parser.add_argument(
+        "--tf-split-path",
+        type=Path,
+        help="Load an existing TF split JSON. Takes precedence over --tf-split-mode.",
+    )
+    parser.add_argument(
+        "--tf-split-out",
+        type=Path,
+        help="Where to save the resolved TF split JSON. Defaults to output_dir/tf_split.json.",
+    )
+    parser.add_argument("--tf-train-fraction", type=float, default=0.7)
+    parser.add_argument("--tf-val-fraction", type=float, default=0.15)
+    parser.add_argument(
         "--no-pos-weight",
         action="store_true",
         help="Disable positive-class weighting in dense BCE.",
@@ -192,6 +266,18 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.input_mode == "embedding" and args.embeddings_path is None:
         raise ValueError("--embeddings-path is required for --input-mode embedding")
+    if args.model == "dense_protein_res_dilated_cnn" and args.tf_embeddings_path is None:
+        raise ValueError(
+            "--tf-embeddings-path is required for --model dense_protein_res_dilated_cnn"
+        )
+    if (
+        args.drop_missing_tf_embeddings or args.tf_name_filter_from_embeddings
+    ) and args.tf_embeddings_path is None:
+        raise ValueError(
+            "--tf-embeddings-path is required when filtering TFs to available embeddings"
+        )
+    if args.tf_split_mode != "none" and args.model != "dense_protein_res_dilated_cnn":
+        raise ValueError("TF holdout splits are only meaningful for dense protein models")
     if args.eval_every < 0:
         raise ValueError("--eval-every must be non-negative")
     if args.output_dir is None:
@@ -226,12 +312,16 @@ def serializable_args(args: argparse.Namespace) -> dict[str, object]:
     return out
 
 
-def build_dataset(args: argparse.Namespace):
+def build_dataset(
+    args: argparse.Namespace,
+    tf_name_filter: set[str] | None = None,
+):
     common = {
         "sites_path": args.sites_path,
         "regions_path": args.regions_path,
         "min_sites_per_tf": args.min_sites_per_tf,
         "sequence_orientation": args.sequence_orientation,
+        "tf_name_filter": tf_name_filter,
         "max_regions": args.max_regions,
         "trim_terminal_atg": not args.include_terminal_atg,
     }
@@ -268,6 +358,23 @@ def build_promoter_split(args: argparse.Namespace, dataset) -> dict[str, object]
     return normalize_promoter_split(raw_split, dataset.records)
 
 
+def build_tf_split(args: argparse.Namespace, dataset) -> dict[str, object]:
+    if args.tf_split_path is not None:
+        raw_split = load_tf_split(args.tf_split_path)
+    elif args.tf_split_mode == "none":
+        raw_split = make_all_train_tf_split(dataset.tf_names)
+    elif args.tf_split_mode == "random":
+        raw_split = make_random_tf_split(
+            dataset.tf_names,
+            seed=args.seed,
+            train_fraction=args.tf_train_fraction,
+            val_fraction=args.tf_val_fraction,
+        )
+    else:
+        raise ValueError(f"Unknown TF split mode: {args.tf_split_mode}")
+    return normalize_tf_split(raw_split, dataset.tf_names)
+
+
 def make_split_loader(
     dataset,
     indices: list[int],
@@ -291,6 +398,12 @@ def make_split_loader(
     )
 
 
+def tensor_indices(indices: list[int], device: torch.device) -> torch.Tensor | None:
+    if not indices:
+        return None
+    return torch.tensor(indices, dtype=torch.long, device=device)
+
+
 def infer_input_channels(dataset, input_mode: str) -> int:
     sample = dataset[0]["x"]
     if not isinstance(sample, torch.Tensor):
@@ -304,6 +417,28 @@ def prepare_x(x: torch.Tensor, input_mode: str) -> torch.Tensor:
     if input_mode == "embedding":
         return x.transpose(1, 2).contiguous()
     return x
+
+
+def forward_dense_model(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    tf_indices: torch.Tensor | None,
+) -> torch.Tensor:
+    if getattr(model, "supports_tf_indices", False):
+        return model(x, tf_indices=tf_indices)
+    logits = model(x)
+    if tf_indices is not None:
+        logits = logits.index_select(1, tf_indices)
+    return logits
+
+
+def select_tf_axis(
+    tensor: torch.Tensor,
+    tf_indices: torch.Tensor | None,
+) -> torch.Tensor:
+    if tf_indices is None:
+        return tensor
+    return tensor.index_select(1, tf_indices)
 
 
 def collate_promoter_batch(
@@ -436,6 +571,12 @@ def model_config_from_args(args: argparse.Namespace, input_channels: int) -> dic
         "embeddings_path": str(args.embeddings_path) if args.embeddings_path else None,
         "embedding_column": args.embedding_column,
         "embedding_key_column": args.embedding_key_column,
+        "tf_embeddings_path": str(args.tf_embeddings_path) if args.tf_embeddings_path else None,
+        "tf_embedding_key_column": args.tf_embedding_key_column,
+        "tf_embedding_column": args.tf_embedding_column,
+        "tf_name_map": str(args.tf_name_map) if args.tf_name_map else None,
+        "drop_missing_tf_embeddings": args.drop_missing_tf_embeddings,
+        "tf_name_filter_from_embeddings": args.tf_name_filter_from_embeddings,
         "trim_terminal_atg": not args.include_terminal_atg,
     }
 
@@ -455,6 +596,8 @@ def save_checkpoint(
     input_channels: int,
     stats: DenseEpochStats,
     promoter_split: dict[str, object] | None = None,
+    tf_split: dict[str, object] | None = None,
+    tf_embedding_metadata: dict[str, object] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -468,6 +611,8 @@ def save_checkpoint(
             "tf_names": dataset.tf_names,
             "dataset_summary": dataset.summary(),
             "promoter_split": promoter_split,
+            "tf_split": tf_split,
+            "tf_embedding_metadata": tf_embedding_metadata,
             "stats": asdict(stats),
         },
         path,
@@ -482,6 +627,7 @@ def train_one_epoch(
     device: torch.device,
     input_mode: str,
     pos_weight: torch.Tensor | None,
+    tf_indices: torch.Tensor | None,
     epoch: int,
 ) -> DenseEpochStats:
     model.train()
@@ -497,10 +643,12 @@ def train_one_epoch(
         mask = batch["mask"].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        logits = model(x)
+        logits = forward_dense_model(model, x, tf_indices)
+        y = select_tf_axis(y, tf_indices)
+        batch_pos_weight = select_tf_axis(pos_weight, tf_indices) if pos_weight is not None else None
         if logits.shape != y.shape:
             raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
-        loss = dense_bce_loss(logits, y, mask, pos_weight)
+        loss = dense_bce_loss(logits, y, mask, batch_pos_weight)
         loss.backward()
         optimizer.step()
 
@@ -539,6 +687,7 @@ def evaluate_dense(
     device: torch.device,
     input_mode: str,
     pos_weight: torch.Tensor | None,
+    tf_indices: torch.Tensor | None,
 ) -> DenseSplitStats:
     model.eval()
     total_loss = 0.0
@@ -553,10 +702,16 @@ def evaluate_dense(
             y = batch["y"].to(device, non_blocking=True)
             mask = batch["mask"].to(device, non_blocking=True)
 
-            logits = model(x)
+            logits = forward_dense_model(model, x, tf_indices)
+            y = select_tf_axis(y, tf_indices)
+            batch_pos_weight = (
+                select_tf_axis(pos_weight, tf_indices)
+                if pos_weight is not None
+                else None
+            )
             if logits.shape != y.shape:
                 raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
-            loss = dense_bce_loss(logits, y, mask, pos_weight)
+            loss = dense_bce_loss(logits, y, mask, batch_pos_weight)
 
             batch_size = x.shape[0]
             total_loss += float(loss.detach().cpu()) * batch_size
@@ -599,14 +754,32 @@ def main() -> None:
     device = get_device(args.device)
     dilations = parse_dilations(args.dilations)
 
-    dataset = build_dataset(args)
+    tf_name_filter = None
+    if args.drop_missing_tf_embeddings or args.tf_name_filter_from_embeddings:
+        tf_name_filter = available_embedding_keys(
+            args.tf_embeddings_path,
+            key_column=args.tf_embedding_key_column,
+            name_mapping_path=args.tf_name_map,
+        )
+        print(f"Filtering TF labels to {len(tf_name_filter)} embedding keys")
+
+    dataset = build_dataset(args, tf_name_filter=tf_name_filter)
     promoter_split = build_promoter_split(args, dataset)
+    tf_split = build_tf_split(args, dataset)
     train_indices = split_indices(promoter_split, "train")
     val_indices = split_indices(promoter_split, "val")
     test_indices = split_indices(promoter_split, "test")
+    train_tf_indices = tf_split_indices(tf_split, "train")
+    val_tf_indices = tf_split_indices(tf_split, "val")
+    test_tf_indices = tf_split_indices(tf_split, "test")
+    use_tf_holdout = bool(val_tf_indices or test_tf_indices)
+    train_tf_tensor = tensor_indices(train_tf_indices, device) if use_tf_holdout else None
+    val_tf_tensor = tensor_indices(val_tf_indices, device) if val_tf_indices else None
+    test_tf_tensor = tensor_indices(test_tf_indices, device) if test_tf_indices else None
     input_channels = infer_input_channels(dataset, args.input_mode)
     print("Dataset:", dataset.summary())
     print("Promoter split:", promoter_split["counts"])
+    print("TF split:", tf_split["counts"])
     print("Input channels:", input_channels)
     print("Device:", device)
     print("Model:", args.model)
@@ -647,10 +820,30 @@ def main() -> None:
         shuffle=False,
     )
 
+    tf_embeddings = None
+    tf_embedding_metadata = None
+    if args.model == "dense_protein_res_dilated_cnn":
+        tf_embeddings, tf_embedding_metadata = load_tf_embeddings(
+            args.tf_embeddings_path,
+            dataset.tf_names,
+            key_column=args.tf_embedding_key_column,
+            embedding_column=args.tf_embedding_column,
+            name_mapping_path=args.tf_name_map,
+        )
+        print(
+            "TF embeddings:",
+            {
+                "path": str(args.tf_embeddings_path),
+                "n_tfs": int(tf_embeddings.shape[0]),
+                "embedding_dim": int(tf_embeddings.shape[1]),
+            },
+        )
+
     model = build_dense_model(
         args.model,
         n_tfs=len(dataset.tf_names),
         input_channels=input_channels,
+        tf_embeddings=tf_embeddings,
         hidden_channels=args.hidden_channels,
         kernel_size=args.kernel_size,
         dropout=args.dropout,
@@ -688,6 +881,11 @@ def main() -> None:
     split_out = args.promoter_split_out or (args.output_dir / "promoter_split.json")
     save_promoter_split(split_out, promoter_split)
     print(f"Saved promoter split: {split_out}")
+    tf_split_out = args.tf_split_out or (args.output_dir / "tf_split.json")
+    save_tf_split(tf_split_out, tf_split)
+    print(f"Saved TF split: {tf_split_out}")
+    if tf_embedding_metadata is not None:
+        save_json(args.output_dir / "tf_embedding_metadata.json", tf_embedding_metadata)
 
     best_loss = float("inf")
     use_val_for_selection = val_loader is not None and args.eval_every > 0
@@ -701,6 +899,7 @@ def main() -> None:
             device=device,
             input_mode=args.input_mode,
             pos_weight=pos_weight,
+            tf_indices=train_tf_tensor,
             epoch=epoch,
         )
         if use_val_for_selection and (
@@ -713,7 +912,8 @@ def main() -> None:
                     loader=val_loader,
                     device=device,
                     input_mode=args.input_mode,
-                    pos_weight=pos_weight,
+                    pos_weight=None if use_tf_holdout else pos_weight,
+                    tf_indices=val_tf_tensor if use_tf_holdout else None,
                 ),
             )
 
@@ -759,6 +959,8 @@ def main() -> None:
             input_channels=input_channels,
             stats=stats,
             promoter_split=promoter_split,
+            tf_split=tf_split,
+            tf_embedding_metadata=tf_embedding_metadata,
         )
         if selection_loss is not None and selection_loss < best_loss:
             best_loss = selection_loss
@@ -772,6 +974,8 @@ def main() -> None:
                 input_channels=input_channels,
                 stats=stats,
                 promoter_split=promoter_split,
+                tf_split=tf_split,
+                tf_embedding_metadata=tf_embedding_metadata,
             )
         if args.save_every and epoch % args.save_every == 0:
             save_checkpoint(
@@ -784,6 +988,8 @@ def main() -> None:
                 input_channels=input_channels,
                 stats=stats,
                 promoter_split=promoter_split,
+                tf_split=tf_split,
+                tf_embedding_metadata=tf_embedding_metadata,
             )
 
     best_path = args.output_dir / "best.pt"
@@ -798,21 +1004,36 @@ def main() -> None:
         "selection_metric": best_metric_name,
         "best_loss": best_loss,
         "promoter_split_counts": promoter_split["counts"],
+        "tf_split_counts": tf_split["counts"],
     }
-    final_loaders = {
-        "train": train_eval_loader,
-        "val": val_loader,
-        "test": test_loader,
-    }
-    for split_name, split_loader in final_loaders.items():
+    if use_tf_holdout:
+        final_jobs = {
+            "train_promoters_train_tfs": (train_eval_loader, train_tf_tensor),
+            "val_promoters_val_tfs": (val_loader, val_tf_tensor),
+            "test_promoters_test_tfs": (test_loader, test_tf_tensor),
+            "test_promoters_train_tfs": (test_loader, train_tf_tensor),
+            "train_promoters_test_tfs": (train_eval_loader, test_tf_tensor),
+        }
+        eval_pos_weight = None
+    else:
+        final_jobs = {
+            "train": (train_eval_loader, None),
+            "val": (val_loader, None),
+            "test": (test_loader, None),
+        }
+        eval_pos_weight = pos_weight
+    for split_name, (split_loader, split_tf_tensor) in final_jobs.items():
         if split_loader is None:
+            continue
+        if use_tf_holdout and split_tf_tensor is None:
             continue
         split_stats = evaluate_dense(
             model=model,
             loader=split_loader,
             device=device,
             input_mode=args.input_mode,
-            pos_weight=pos_weight,
+            pos_weight=eval_pos_weight,
+            tf_indices=split_tf_tensor,
         )
         final_metrics[split_name] = asdict(split_stats)
     save_json(args.output_dir / "final_metrics.json", final_metrics)
