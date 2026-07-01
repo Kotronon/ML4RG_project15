@@ -51,6 +51,14 @@ PLATEAU_FACTOR="${PLATEAU_FACTOR:-0.5}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-auto}"
+PROMOTER_SPLIT_MODE="${PROMOTER_SPLIT_MODE:-none}"
+PROMOTER_SPLIT_PATH="${PROMOTER_SPLIT_PATH:-}"
+PROMOTER_SPLIT_OUT="${PROMOTER_SPLIT_OUT:-}"
+TRAIN_FRACTION="${TRAIN_FRACTION:-0.8}"
+VAL_FRACTION="${VAL_FRACTION:-0.1}"
+VAL_CHROMS="${VAL_CHROMS:-}"
+TEST_CHROMS="${TEST_CHROMS:-}"
+EVAL_EVERY="${EVAL_EVERY:-1}"
 NO_POS_WEIGHT="${NO_POS_WEIGHT:-false}"
 SAVE_EVERY="${SAVE_EVERY:-10}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
@@ -96,6 +104,14 @@ echo "LR:                   ${LR}"
 echo "Weight decay:         ${WEIGHT_DECAY}"
 echo "LR scheduler:         ${LR_SCHEDULER}"
 echo "Device:               ${DEVICE}"
+echo "Promoter split mode:  ${PROMOTER_SPLIT_MODE}"
+echo "Promoter split path:  ${PROMOTER_SPLIT_PATH:-<none>}"
+echo "Promoter split out:   ${PROMOTER_SPLIT_OUT:-<output-dir>/promoter_split.json}"
+echo "Train fraction:       ${TRAIN_FRACTION}"
+echo "Val fraction:         ${VAL_FRACTION}"
+echo "Val chroms:           ${VAL_CHROMS:-<none>}"
+echo "Test chroms:          ${TEST_CHROMS:-<none>}"
+echo "Eval every:           ${EVAL_EVERY}"
 echo "Sequence orientation: ${SEQUENCE_ORIENTATION}"
 echo "Include terminal ATG: ${INCLUDE_TERMINAL_ATG}"
 echo "No pos weight:        ${NO_POS_WEIGHT}"
@@ -111,6 +127,12 @@ if [[ "${INPUT_MODE}" == "embedding" ]]; then
 fi
 if [[ -n "${MAX_REGIONS}" ]]; then
     OPTIONAL_ARGS+=(--max-regions "${MAX_REGIONS}")
+fi
+if [[ -n "${PROMOTER_SPLIT_PATH}" ]]; then
+    OPTIONAL_ARGS+=(--promoter-split-path "${PROMOTER_SPLIT_PATH}")
+fi
+if [[ -n "${PROMOTER_SPLIT_OUT}" ]]; then
+    OPTIONAL_ARGS+=(--promoter-split-out "${PROMOTER_SPLIT_OUT}")
 fi
 if [[ "${NO_POS_WEIGHT}" == "true" ]]; then
     OPTIONAL_ARGS+=(--no-pos-weight)
@@ -142,6 +164,12 @@ fi
     --num-workers "${NUM_WORKERS}" \
     --seed "${SEED}" \
     --device "${DEVICE}" \
+    --promoter-split-mode "${PROMOTER_SPLIT_MODE}" \
+    --train-fraction "${TRAIN_FRACTION}" \
+    --val-fraction "${VAL_FRACTION}" \
+    --val-chroms "${VAL_CHROMS}" \
+    --test-chroms "${TEST_CHROMS}" \
+    --eval-every "${EVAL_EVERY}" \
     --save-every "${SAVE_EVERY}" \
     "${OPTIONAL_ARGS[@]}" \
     ${EXTRA_ARGS}

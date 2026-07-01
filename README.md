@@ -60,6 +60,31 @@ MODEL=dense_res_dilated_cnn \
 sbatch slurm/train_promoter_dense.sbatch
 ```
 
+For held-out promoter evaluation, train with a promoter split. Random splits are
+useful for smoke testing; chromosome splits are the cleaner baseline for
+unseen genomic regions. Checkpoints are selected by validation loss when a
+validation split is present, and `final_metrics.json` reports train/val/test
+dense metrics.
+
+```bash
+INPUT_MODE=embedding \
+EMBEDDINGS_PATH=/path/to/promoter_position_embeddings.npy \
+MODEL=dense_res_dilated_cnn \
+PROMOTER_SPLIT_MODE=random \
+TRAIN_FRACTION=0.8 \
+VAL_FRACTION=0.1 \
+OUTPUT_DIR=/s/project/ml4rg_students/2026/project15/working/supervised_baseline/models/promoter_specieslm_l11_res_dilated_cnn_random_promoter_split \
+sbatch slurm/train_promoter_dense.sbatch
+
+INPUT_MODE=raw \
+MODEL=dense_res_dilated_cnn \
+PROMOTER_SPLIT_MODE=chromosome \
+VAL_CHROMS=VII \
+TEST_CHROMS=VIII,IX \
+OUTPUT_DIR=/s/project/ml4rg_students/2026/project15/working/supervised_baseline/models/promoter_raw_res_dilated_cnn_chr_promoter_split \
+sbatch slurm/train_promoter_dense.sbatch
+```
+
 Evaluate a trained dense promoter checkpoint with Binding Bench:
 
 ```bash
