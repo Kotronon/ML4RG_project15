@@ -39,7 +39,7 @@ FEATURE_RANK_NAME="${FEATURE_RANK_NAME:-model_score}"
 METHOD_NAME="${METHOD_NAME:-promoter_${INPUT_MODE}_${MODEL}_${SCORE_MODE}_nms${NMS_RADIUS_BP}}"
 DISPLAY_NAME="${DISPLAY_NAME:-Promoter ${INPUT_MODE} ${MODEL} (${SCORE_MODE}, nms=${NMS_RADIUS_BP})}"
 INPUT_DIR="${PROJECT}/working/binding_bench_inputs"
-RUN_DIR="${PROJECT}/working/binding_bench_runs/${METHOD_NAME}"
+RUN_DIR="${RUN_DIR:-${PROJECT}/working/binding_bench_reports/${METHOD_NAME}}"
 PREDICTIONS="${PREDICTIONS:-${INPUT_DIR}/${METHOD_NAME}_predictions.parquet}"
 FEATURE_RANKS="${FEATURE_RANKS:-${INPUT_DIR}/${METHOD_NAME}_feature_ranks.parquet}"
 
