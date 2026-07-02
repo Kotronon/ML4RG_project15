@@ -80,7 +80,7 @@ def subsample_indices(
     seed: int,
 ) -> np.ndarray:
     """Keep all positive positions (any TF) + random negatives up to max_positions."""
-    labels = np.stack([rec.labels for rec in dataset.records])  # [N, n_tfs]
+    labels = dataset.get_labels_array()   # [N, n_tfs] — compact numpy array
     is_positive = labels.any(axis=1)
     pos_idx = np.where(is_positive)[0]
     neg_idx = np.where(~is_positive)[0]
@@ -227,6 +227,9 @@ def main() -> None:
         labels=labels,
         tf_names=np.array(dataset.tf_names),
         flat_indices=sub_idx,
+        genomic_pos=dataset._genomic_pos[sub_idx],
+        chroms=np.array(dataset._chroms)[sub_idx],
+        gene_ids=np.array(dataset._gene_ids)[sub_idx],
     )
     print(f"\nResults saved → {args.output_dir}")
 

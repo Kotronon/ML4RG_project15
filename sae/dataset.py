@@ -211,35 +211,37 @@ class NpyPositionWithLabelsDataset(Dataset):
         for lst in sites_by_chrom.values():
             lst.sort()
 
-        # Build per-position records
-        self.records: list[LabeledPosition] = []
+        # Build compact numpy arrays instead of 6.57M Python objects
+        # Labels: [N_genes * seq_len, n_tfs] uint8  (~330 MB for 6.57M × 50 TFs)
+        # Metadata stored as parallel arrays (not per-object)
+        n_total = N * seq_len
+        self._labels_arr  = np.zeros((n_total, len(self.tf_names)), dtype=np.uint8)
+        self._gene_idx    = np.zeros(n_total, dtype=np.int32)
+        self._pos_idx     = np.zeros(n_total, dtype=np.int16)
+        self._genomic_pos = np.zeros(n_total, dtype=np.int32)
+        self._gene_ids    : list[str] = []
+        self._chroms      : list[str] = []
+
+        flat = 0
         for gene_idx, region in enumerate(region_rows):
-            chrom = str(region["chrom"])
+            chrom    = str(region["chrom"])
             reg_start = int(region["start"])
-            reg_end = int(region["end"])
-            strand = str(region["strand"])
-            gene_id = str(region["gene_id"])
+            reg_end   = int(region["end"])
+            strand    = str(region["strand"])
+            gene_id   = str(region["gene_id"])
             chrom_sites = sites_by_chrom.get(chrom, [])
 
             for pos_idx in range(seq_len):
-                # Map sequence position → genomic coordinate
-                if strand == "+":
-                    genomic_pos = reg_start + pos_idx
-                else:
-                    genomic_pos = reg_end - 1 - pos_idx
+                genomic_pos = reg_start + pos_idx if strand == "+" else reg_end - 1 - pos_idx
+                self._labels_arr[flat]  = (self._labels_at(genomic_pos, chrom_sites) * 255).astype(np.uint8)
+                self._gene_idx[flat]    = gene_idx
+                self._pos_idx[flat]     = pos_idx
+                self._genomic_pos[flat] = genomic_pos
+                self._gene_ids.append(gene_id)
+                self._chroms.append(chrom)
+                flat += 1
 
-                labels = self._labels_at(genomic_pos, chrom_sites)
-                self.records.append(LabeledPosition(
-                    gene_idx=gene_idx,
-                    pos_idx=pos_idx,
-                    chrom=chrom,
-                    genomic_pos=genomic_pos,
-                    strand=strand,
-                    gene_id=gene_id,
-                    labels=labels,
-                ))
-
-        self.n_positions = len(self.records)
+        self.n_positions = n_total
 
     def _labels_at(
         self,
@@ -260,26 +262,30 @@ class NpyPositionWithLabelsDataset(Dataset):
         return self.n_positions
 
     def __getitem__(self, idx: int) -> dict[str, object]:
-        rec = self.records[idx]
-        # Load embedding on demand from the shared float16 array → cast to float32 for model
+        g = int(self._gene_idx[idx])
+        p = int(self._pos_idx[idx])
         emb = torch.tensor(
-            self._seq_embs[rec.gene_idx, rec.pos_idx].astype(np.float32),
-            dtype=torch.float32,
+            self._seq_embs[g, p].astype(np.float32), dtype=torch.float32
         )
+        labels = torch.tensor(self._labels_arr[idx].astype(np.float32) / 255.0, dtype=torch.float32)
         return {
-            "embedding": emb,
-            "labels": torch.tensor(rec.labels, dtype=torch.float32),
-            "gene_idx": rec.gene_idx,
-            "pos_idx": rec.pos_idx,
-            "genomic_pos": rec.genomic_pos,
-            "chrom": rec.chrom,
-            "gene_id": rec.gene_id,
+            "embedding":   emb,
+            "labels":      labels,
+            "gene_idx":    g,
+            "pos_idx":     p,
+            "genomic_pos": int(self._genomic_pos[idx]),
+            "chrom":       self._chroms[idx],
+            "gene_id":     self._gene_ids[idx],
         }
 
+    def get_labels_array(self) -> np.ndarray:
+        """Return full [N, n_tfs] float32 label array for subsampling."""
+        return (self._labels_arr > 0).astype(np.float32)
+
     def summary(self) -> dict[str, object]:
-        n_pos_with_site = sum(rec.labels.any() for rec in self.records)
+        n_pos_with_site = int((self._labels_arr.any(axis=1)).sum())
         return {
-            "n_genes": len(set(r.gene_idx for r in self.records)),
+            "n_genes": int(self._gene_idx.max()) + 1,
             "n_positions": self.n_positions,
             "n_positions_with_binding_site": n_pos_with_site,
             "n_tfs": self.n_tfs,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=sae-eval
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --gres=gpu:1
 #SBATCH --time=01:00:00
 #SBATCH --partition=student_project
@@ -16,7 +16,7 @@ REPO_DIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 
 CHECKPOINT="${CHECKPOINT:-${PROJECT}/working/sae/models/topk_ef8_k32/best.pt}"
 EMBEDDING_PATH="${EMBEDDING_PATH:-/s/project/ml4rg_students/2026/project15/raw/embeddings/other_models/specieslm_v1/_saccharomyces_cerevisiae/embs_ds_fungi_upstream_ATG_1000_l10.npy}"
-HALF_WINDOW="${HALF_WINDOW:-50}"
+HALF_WINDOW="${HALF_WINDOW:-5}"
 SEQ_OFFSET="${SEQ_OFFSET:-1}"
 SEQ_LEN="${SEQ_LEN:-1000}"
 SITES_PATH="${SITES_PATH:-/s/project/multispecies/fungi_code/tf_sae/binding_bench_datasets/val/dna/_saccharomyces_cerevisiae/DNA_rossi_chipexo_sites.parquet}"
@@ -25,9 +25,10 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT}/working/sae/evals}"
 
 MIN_SITES_PER_TF="${MIN_SITES_PER_TF:-15}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
-NUM_WORKERS="${NUM_WORKERS:-4}"
+NUM_WORKERS="${NUM_WORKERS:-0}"
 DEVICE="${DEVICE:-auto}"
 TOP_N_FEATURES="${TOP_N_FEATURES:-10}"
+MAX_EVAL_POSITIONS="${MAX_EVAL_POSITIONS:-500000}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 CONDA_PREFIX="$(${PYTHON_BIN} -c 'import sys; print(sys.prefix)')"
@@ -55,6 +56,7 @@ echo "Embeddings: ${EMBEDDING_PATH}"
     --num-workers "${NUM_WORKERS}" \
     --device "${DEVICE}" \
     --top-n-features "${TOP_N_FEATURES}" \
+    --max-eval-positions "${MAX_EVAL_POSITIONS}" \
     ${EXTRA_ARGS}
 
 echo "SAE evaluation finished."
