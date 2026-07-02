@@ -147,8 +147,8 @@ class LabeledPosition:
     genomic_pos: int      # absolute genomic coordinate of this base
     strand: str
     gene_id: str
-    embedding: np.ndarray  # shape [d]
     labels: np.ndarray     # shape [n_tfs], 1.0 if a binding site centre falls here ±half_window
+    # embedding NOT stored here — loaded on demand from self._seq_embs to save ~20 GB RAM
 
 
 class NpyPositionWithLabelsDataset(Dataset):
@@ -176,13 +176,14 @@ class NpyPositionWithLabelsDataset(Dataset):
     ) -> None:
         self.half_window = half_window
 
-        # Load embeddings
-        raw = np.load(Path(npy_path)).astype(np.float32)  # [N, L, d]
+        # Load embeddings as float16 to save RAM (~10 GB instead of ~20 GB)
+        raw = np.load(Path(npy_path))  # float16 [N, L, d]
         N, L, d = raw.shape
         end = seq_offset + seq_len
-        seq_embs = raw[:, seq_offset:end, :]  # [N, seq_len, d]
+        self._seq_embs = raw[:, seq_offset:end, :].astype(np.float16)  # [N, seq_len, d]
         if normalize:
-            seq_embs -= seq_embs.reshape(-1, d).mean(axis=0)
+            mean = self._seq_embs.reshape(-1, d).mean(axis=0)
+            self._seq_embs = (self._seq_embs - mean).astype(np.float16)
         self.input_dim = d
 
         # Load regions (gene order must match npy row order)
@@ -225,7 +226,6 @@ class NpyPositionWithLabelsDataset(Dataset):
                 if strand == "+":
                     genomic_pos = reg_start + pos_idx
                 else:
-                    # Sequence stored 5'→3' (reverse complement), so pos 0 = reg_end-1
                     genomic_pos = reg_end - 1 - pos_idx
 
                 labels = self._labels_at(genomic_pos, chrom_sites)
@@ -236,7 +236,6 @@ class NpyPositionWithLabelsDataset(Dataset):
                     genomic_pos=genomic_pos,
                     strand=strand,
                     gene_id=gene_id,
-                    embedding=seq_embs[gene_idx, pos_idx],
                     labels=labels,
                 ))
 
@@ -262,8 +261,13 @@ class NpyPositionWithLabelsDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, object]:
         rec = self.records[idx]
+        # Load embedding on demand from the shared float16 array → cast to float32 for model
+        emb = torch.tensor(
+            self._seq_embs[rec.gene_idx, rec.pos_idx].astype(np.float32),
+            dtype=torch.float32,
+        )
         return {
-            "embedding": torch.tensor(rec.embedding, dtype=torch.float32),
+            "embedding": emb,
             "labels": torch.tensor(rec.labels, dtype=torch.float32),
             "gene_idx": rec.gene_idx,
             "pos_idx": rec.pos_idx,
