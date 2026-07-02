@@ -12,8 +12,7 @@ set -euo pipefail
 
 PROJECT="${ML4RG_PROJECT:-/s/project/ml4rg_students/2026/project15}"
 PYTHON_BIN="${PYTHON_BIN:-/opt/modules/i12g/anaconda/envs/ml4rg_project15/bin/python}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="${REPO_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+REPO_DIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 
 CHECKPOINT="${CHECKPOINT:-${PROJECT}/working/sae/models/topk_ef8_k32/best.pt}"
 EMBEDDING_PATH="${EMBEDDING_PATH:-/s/project/ml4rg_students/2026/project15/raw/embeddings/other_models/specieslm_v1/_saccharomyces_cerevisiae/embs_ds_fungi_upstream_ATG_1000_l10.npy}"

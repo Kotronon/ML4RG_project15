@@ -12,8 +12,7 @@ set -euo pipefail
 
 PROJECT="${ML4RG_PROJECT:-/s/project/ml4rg_students/2026/project15}"
 PYTHON_BIN="${PYTHON_BIN:-/opt/modules/i12g/anaconda/envs/ml4rg_project15/bin/python}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="${REPO_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+REPO_DIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 
 DATA_ROOT="${DATA_ROOT:-/s/project/multispecies/fungi_code/tf_sae/processed/sequence_datasets/fungi_upstream_ATG_1000}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT}/working/sae/embeddings}"
