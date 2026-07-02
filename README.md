@@ -16,6 +16,23 @@ Requires `transformers` and `biopython` in the Python environment.
   --device cuda
 ```
 
+Generate yeast TF embeddings with ESM-DBP:
+
+The output parquet uses the same schema as the ESM-2 embeddings
+(`protein_id`, `orf`, `gene`, `emb`), so it can be passed directly as
+`TF_EMBEDDINGS_PATH` in later runs. The wrapper expects the downloaded
+Hugging Face model files under `$PROJECT/working/protein_models/ESM-DBP`.
+If that directory does not contain the ESM-DBP runner script, pass a checkout
+of the ESM-DBP or TransBind code via `ESMDBP_CODE_DIR`, or pass the exact
+runner path via `RUNNER_SCRIPT`.
+
+```bash
+ESMDBP_MODEL_DIR=/s/project/ml4rg_students/2026/project15/working/protein_models/ESM-DBP \
+ESMDBP_CODE_DIR=/path/to/ESM-DBP-or-TransBind-code \
+OUTPUT=/s/project/ml4rg_students/2026/project15/working/protein_embeddings/scer_esmdbp_tf_emb.parquet \
+sbatch slurm/embed_esmdbp.sbatch
+```
+
 Train the protein-conditioned model:
 
 ```bash
