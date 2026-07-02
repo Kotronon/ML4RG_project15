@@ -103,8 +103,9 @@ class NpyPositionDataset(Dataset):
         else:
             self._mean = np.zeros((1, d), dtype=np.float32)
 
-        # Flatten to [N*seq_len, d] — each row is one training example
-        self._embs = torch.tensor(seq_embs.reshape(-1, d), dtype=dtype)
+        # Store as float16 to halve RAM (~10 GB instead of ~20 GB for 6.57M×768)
+        # Cast to float32 in __getitem__ just before returning to the model
+        self._embs = torch.tensor(seq_embs.reshape(-1, d), dtype=torch.float16)
 
         # Build index: flat_idx → (gene_idx, pos_idx_in_seq)
         self._index: list[PosIndex] = [
@@ -121,7 +122,7 @@ class NpyPositionDataset(Dataset):
         return len(self._embs)
 
     def __getitem__(self, idx: int) -> torch.Tensor:
-        return self._embs[idx]
+        return self._embs[idx].float()  # cast float16 → float32 for the model
 
     def gene_pos(self, idx: int) -> PosIndex:
         return self._index[idx]
