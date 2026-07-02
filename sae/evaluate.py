@@ -25,7 +25,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.metrics import average_precision_score, roc_auc_score  # type: ignore[import]
+try:
+    from sklearn.metrics import average_precision_score, roc_auc_score  # type: ignore[import]
+except ModuleNotFoundError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "scikit-learn"])
+    from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.utils.data import DataLoader
 
 try:
