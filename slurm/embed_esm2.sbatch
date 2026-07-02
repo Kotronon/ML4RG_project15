@@ -22,7 +22,6 @@ if [[ -z "${REPO_DIR:-}" ]]; then
 fi
 
 EMBED_SCRIPT="${EMBED_SCRIPT:-${REPO_DIR}/supervised_baseline/embed_proteome_esm2.py}"
-FASTA="${FASTA:-${REPO_DIR}/orf_trans_all.fasta}"
 OUTPUT="${OUTPUT:-${PROJECT}/working/protein_embeddings/scer_esm2_emb.parquet}"
 KEEP_NAMES="${KEEP_NAMES:-}"
 MODEL="${ESM_MODEL:-facebook/esm2_t33_650M_UR50D}"
@@ -32,6 +31,59 @@ DEVICE="${DEVICE:-cuda}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 mkdir -p "${REPO_DIR}/slurm/logs" "$(dirname "${OUTPUT}")"
+
+resolve_fasta() {
+    if [[ -n "${FASTA:-}" ]]; then
+        printf '%s\n' "${FASTA}"
+        return 0
+    fi
+
+    local candidates=(
+        "${PROJECT}/raw/protein_sequences/orf_trans_all.fasta"
+        "${PROJECT}/raw/protein_sequences/orf_trans_all.fasta.gz"
+        "${PROJECT}/raw/proteomes/orf_trans_all.fasta"
+        "${PROJECT}/raw/proteomes/orf_trans_all.fasta.gz"
+        "${PROJECT}/raw/sgd/orf_trans_all.fasta"
+        "${PROJECT}/raw/sgd/orf_trans_all.fasta.gz"
+        "${PROJECT}/working/SGD/orf_trans_all.fasta"
+        "${PROJECT}/working/SGD/orf_trans_all.fasta.gz"
+        "${PROJECT}/working/protein_embeddings/orf_trans_all.fasta"
+        "${PROJECT}/working/protein_embeddings/orf_trans_all.fasta.gz"
+        "${REPO_DIR}/orf_trans_all.fasta"
+        "${REPO_DIR}/orf_trans_all.fasta.gz"
+        "${HOME}/project15/raw/protein_sequences/orf_trans_all.fasta"
+        "${HOME}/project15/raw/proteomes/orf_trans_all.fasta"
+        "${HOME}/project15/raw/sgd/orf_trans_all.fasta"
+        "${HOME}/project15/working/SGD/orf_trans_all.fasta"
+    )
+
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    local found
+    found="$(
+        find "${PROJECT}" "${HOME}" -maxdepth 7 \
+            \( -name 'orf_trans_all.fasta' -o -name 'orf_trans_all.fasta.gz' \) \
+            -type f -print -quit 2>/dev/null || true
+    )"
+    if [[ -n "${found}" ]]; then
+        printf '%s\n' "${found}"
+        return 0
+    fi
+
+    return 1
+}
+
+if ! FASTA="$(resolve_fasta)"; then
+    echo "Could not find orf_trans_all.fasta automatically." >&2
+    echo "Set FASTA=/path/to/orf_trans_all.fasta or FASTA=/path/to/orf_trans_all.fasta.gz." >&2
+    exit 1
+fi
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "Python executable not found: ${PYTHON_BIN}" >&2
