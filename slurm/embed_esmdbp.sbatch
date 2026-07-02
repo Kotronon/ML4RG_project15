@@ -43,21 +43,22 @@ resolve_fasta() {
     fi
 
     local candidates=(
-        "${PROJECT}/raw/protein_sequences/orf_trans_all.fasta"
         "${PROJECT}/raw/protein_sequences/orf_trans_all.fasta.gz"
-        "${PROJECT}/raw/proteomes/orf_trans_all.fasta"
+        "${PROJECT}/raw/protein_sequences/orf_trans_all.fasta"
         "${PROJECT}/raw/proteomes/orf_trans_all.fasta.gz"
-        "${PROJECT}/raw/sgd/orf_trans_all.fasta"
+        "${PROJECT}/raw/proteomes/orf_trans_all.fasta"
         "${PROJECT}/raw/sgd/orf_trans_all.fasta.gz"
-        "${PROJECT}/working/SGD/orf_trans_all.fasta"
+        "${PROJECT}/raw/sgd/orf_trans_all.fasta"
         "${PROJECT}/working/SGD/orf_trans_all.fasta.gz"
-        "${PROJECT}/working/protein_embeddings/orf_trans_all.fasta"
+        "${PROJECT}/working/SGD/orf_trans_all.fasta"
         "${PROJECT}/working/protein_embeddings/orf_trans_all.fasta.gz"
-        "${REPO_DIR}/orf_trans_all.fasta"
+        "${PROJECT}/working/protein_embeddings/orf_trans_all.fasta"
         "${REPO_DIR}/orf_trans_all.fasta.gz"
+        "${REPO_DIR}/orf_trans_all.fasta"
         "${HOME}/project15/raw/protein_sequences/orf_trans_all.fasta"
         "${HOME}/project15/raw/proteomes/orf_trans_all.fasta"
         "${HOME}/project15/raw/sgd/orf_trans_all.fasta"
+        "${HOME}/project15/working/SGD/orf_trans_all.fasta.gz"
         "${HOME}/project15/working/SGD/orf_trans_all.fasta"
     )
 
@@ -71,10 +72,15 @@ resolve_fasta() {
 
     local found
     found="$(
-        find "${PROJECT}" "${HOME}" -maxdepth 7 \
-            \( -name 'orf_trans_all.fasta' -o -name 'orf_trans_all.fasta.gz' \) \
+        find "${PROJECT}" "${HOME}" -maxdepth 7 -name 'orf_trans_all.fasta.gz' \
             -type f -print -quit 2>/dev/null || true
     )"
+    if [[ -z "${found}" ]]; then
+        found="$(
+            find "${PROJECT}" "${HOME}" -maxdepth 7 -name 'orf_trans_all.fasta' \
+                -type f -print -quit 2>/dev/null || true
+        )"
+    fi
     if [[ -n "${found}" ]]; then
         printf '%s\n' "${found}"
         return 0
