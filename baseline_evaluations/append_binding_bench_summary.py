@@ -61,6 +61,14 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=["jaccard", "precision_lb", "recall_lb"],
     )
+    parser.add_argument(
+        "--target-names-path",
+        type=Path,
+        help=(
+            "Optional file with target TF names to keep before summarizing. "
+            "Accepts JSON list or one name per line."
+        ),
+    )
     parser.add_argument("--meaningful-threshold", type=float, default=0.01)
     parser.add_argument(
         "--replace-existing",
@@ -93,6 +101,41 @@ def best_assignment_path(discrete_dir: Path, metric: str, dataset: str) -> Path:
     )
 
 
+def read_name_filter(path: Path | None) -> set[str] | None:
+    if path is None:
+        return None
+    text = path.read_text().strip()
+    if not text:
+        raise ValueError(f"No target names found in {path}")
+    if text[0] in "[{":
+        import json
+
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            if "tf_names" in payload:
+                payload = payload["tf_names"]
+            elif "names" in payload:
+                payload = payload["names"]
+            elif "test_tf_names" in payload:
+                payload = payload["test_tf_names"]
+            elif "val_tf_names" in payload:
+                payload = payload["val_tf_names"]
+        if not isinstance(payload, list):
+            raise ValueError(
+                f"Expected a JSON list, or object with tf_names/names, in {path}"
+            )
+        names = [str(name).strip() for name in payload if str(name).strip()]
+    else:
+        names = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    if not names:
+        raise ValueError(f"No target names found in {path}")
+    return {name.upper() for name in names}
+
+
 def summarize_metric(
     *,
     discrete_dir: Path,
@@ -100,6 +143,7 @@ def summarize_metric(
     method: str,
     metric: str,
     meaningful_threshold: float,
+    target_names: set[str] | None,
 ) -> dict[str, object]:
     path = best_assignment_path(discrete_dir, metric, dataset)
     if not path.is_file():
@@ -108,6 +152,12 @@ def summarize_metric(
     df = pl.read_parquet(path).with_columns(
         pl.col(metric).cast(pl.Float64).fill_null(0.0)
     )
+    if target_names is not None:
+        df = df.filter(pl.col("name").str.to_uppercase().is_in(target_names))
+        if df.is_empty():
+            raise ValueError(
+                f"No rows remain after target-name filtering for metric {metric}"
+            )
     positive = df.filter(pl.col(metric) > 0)
     meaningful = df.filter(pl.col(metric) >= meaningful_threshold)
     best = df.sort(metric, descending=True).row(0, named=True)
@@ -139,6 +189,7 @@ def read_existing_summary(path: Path) -> pl.DataFrame | None:
 def main() -> None:
     args = parse_args()
     discrete_dir = resolve_discrete_dir(args.run_dir, args.dataset)
+    target_names = read_name_filter(args.target_names_path)
 
     rows = [
         summarize_metric(
@@ -147,6 +198,7 @@ def main() -> None:
             method=args.method,
             metric=metric,
             meaningful_threshold=args.meaningful_threshold,
+            target_names=target_names,
         )
         for metric in args.metrics
     ]

@@ -70,7 +70,11 @@ TF_SPLIT_PATH="${TF_SPLIT_PATH:-}"
 TF_SPLIT_OUT="${TF_SPLIT_OUT:-}"
 TF_TRAIN_FRACTION="${TF_TRAIN_FRACTION:-0.7}"
 TF_VAL_FRACTION="${TF_VAL_FRACTION:-0.15}"
+TF_VAL_NAMES="${TF_VAL_NAMES:-}"
+TF_TEST_NAMES="${TF_TEST_NAMES:-}"
+TF_SIMILARITY_THRESHOLD="${TF_SIMILARITY_THRESHOLD:-0.9}"
 NO_POS_WEIGHT="${NO_POS_WEIGHT:-false}"
+SELECTION_METRIC="${SELECTION_METRIC:-val_loss}"
 SAVE_EVERY="${SAVE_EVERY:-10}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -134,9 +138,13 @@ echo "TF split path:        ${TF_SPLIT_PATH:-<none>}"
 echo "TF split out:         ${TF_SPLIT_OUT:-<output-dir>/tf_split.json}"
 echo "TF train fraction:    ${TF_TRAIN_FRACTION}"
 echo "TF val fraction:      ${TF_VAL_FRACTION}"
+echo "TF val names:         ${TF_VAL_NAMES:-<none>}"
+echo "TF test names:        ${TF_TEST_NAMES:-<none>}"
+echo "TF sim threshold:     ${TF_SIMILARITY_THRESHOLD}"
 echo "Sequence orientation: ${SEQUENCE_ORIENTATION}"
 echo "Include terminal ATG: ${INCLUDE_TERMINAL_ATG}"
 echo "No pos weight:        ${NO_POS_WEIGHT}"
+echo "Selection metric:     ${SELECTION_METRIC}"
 echo "Extra args:           ${EXTRA_ARGS}"
 
 OPTIONAL_ARGS=()
@@ -219,6 +227,10 @@ fi
     --tf-split-mode "${TF_SPLIT_MODE}" \
     --tf-train-fraction "${TF_TRAIN_FRACTION}" \
     --tf-val-fraction "${TF_VAL_FRACTION}" \
+    --tf-val-names "${TF_VAL_NAMES}" \
+    --tf-test-names "${TF_TEST_NAMES}" \
+    --tf-similarity-threshold "${TF_SIMILARITY_THRESHOLD}" \
+    --selection-metric "${SELECTION_METRIC}" \
     --save-every "${SAVE_EVERY}" \
     "${OPTIONAL_ARGS[@]}" \
     ${EXTRA_ARGS}

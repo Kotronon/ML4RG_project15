@@ -270,6 +270,276 @@ class DenseProteinResDilatedCNN(nn.Module):
         return logits
 
 
+class DenseProteinResDilatedCrossAttention(nn.Module):
+    """Protein-conditioned dense scorer with a local CNN path plus attention.
+
+    The local bilinear scorer is the main path and keeps the same peak-localizing
+    inductive bias as ``DenseProteinResDilatedCNN``. A TransBind-style
+    protein-query attention branch contributes a small residual score, initialized
+    near zero so it can add contextual signal without dominating early training.
+    """
+
+    supports_tf_indices = True
+
+    def __init__(
+        self,
+        n_tfs: int,
+        tf_embeddings: torch.Tensor,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 128,
+        kernel_size: int = 7,
+        dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        if tf_embeddings.ndim != 2:
+            raise ValueError("tf_embeddings must have shape [n_tfs, embedding_dim]")
+        if tf_embeddings.shape[0] != n_tfs:
+            raise ValueError(
+                f"Expected {n_tfs} TF embeddings, got {tf_embeddings.shape[0]}"
+            )
+
+        self.register_buffer("tf_embeddings", tf_embeddings.float())
+        embedding_dim = int(tf_embeddings.shape[1])
+        self.stem = nn.Sequential(
+            nn.Conv1d(input_channels, hidden_channels, kernel_size=15, padding=7),
+            nn.BatchNorm1d(hidden_channels),
+            nn.GELU(),
+        )
+        self.blocks = nn.ModuleList(
+            [
+                ResidualDilatedBlock(
+                    hidden_channels,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    dropout=dropout,
+                )
+                for dilation in dilations
+            ]
+        )
+        self.dna_projection = nn.Sequential(
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+        )
+        self.tf_projection = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels),
+        )
+        self.dna_bias = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+        self.tf_bias = nn.Linear(hidden_channels, 1)
+
+        self.context_pool = nn.MaxPool1d(kernel_size=4, stride=4)
+        num_heads = min(8, hidden_channels)
+        while hidden_channels % num_heads != 0:
+            num_heads -= 1
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=hidden_channels,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.attention_norm = nn.LayerNorm(hidden_channels)
+        self.attention_tf_projection = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels),
+        )
+        self.attention_position_projection = nn.Sequential(
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+        )
+        self.attention_log_scale = nn.Parameter(torch.tensor(-3.0))
+        self.score_scale = hidden_channels ** -0.5
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        tf_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        dna = self.stem(x)
+        for block in self.blocks:
+            dna = block(dna)
+
+        tf_embeddings = self.tf_embeddings
+        if tf_indices is not None:
+            tf_embeddings = tf_embeddings.index_select(0, tf_indices)
+        tf_features = self.tf_projection(tf_embeddings)
+
+        dna_features = self.dna_projection(dna)
+        local_logits = torch.einsum("bcl,tc->btl", dna_features, tf_features)
+        local_logits = local_logits * self.score_scale
+        local_logits = local_logits + self.dna_bias(dna)
+        local_logits = local_logits + self.tf_bias(tf_features).view(1, -1, 1)
+
+        context = self.context_pool(dna).transpose(1, 2)
+        tf_query = tf_features.unsqueeze(0).expand(x.shape[0], -1, -1)
+        attended, _ = self.cross_attention(
+            query=tf_query,
+            key=context,
+            value=context,
+            need_weights=False,
+        )
+        attended = self.attention_norm(attended + tf_query)
+        global_dna = context.mean(dim=1).unsqueeze(1).expand(-1, attended.shape[1], -1)
+        attention_tf = self.attention_tf_projection(
+            torch.cat([attended, global_dna], dim=-1)
+        )
+        attention_pos = self.attention_position_projection(dna)
+        attention_logits = torch.einsum("bcl,btc->btl", attention_pos, attention_tf)
+        attention_logits = attention_logits * self.score_scale
+
+        attention_scale = torch.sigmoid(self.attention_log_scale)
+        return local_logits + attention_scale * attention_logits
+
+
+class DenseTransBindCnnLstmAttention(nn.Module):
+    """Dense TransBind-style scorer with CNN, BiLSTM, self-attention, and TF queries.
+
+    The pooled CNN/BiLSTM/Transformer branch follows the TransBind paper more
+    closely and provides contextual DNA keys/values for protein-query
+    cross-attention. A full-resolution CNN branch is kept for dense promoter
+    scoring, so the output remains ``[batch, TF, position]``.
+    """
+
+    supports_tf_indices = True
+
+    def __init__(
+        self,
+        n_tfs: int,
+        tf_embeddings: torch.Tensor,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 320,
+        kernel_size: int = 26,
+        pool_size: int = 13,
+        lstm_layers: int = 2,
+        transformer_heads: int = 8,
+        transformer_ffn_dim: int = 1024,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        if tf_embeddings.ndim != 2:
+            raise ValueError("tf_embeddings must have shape [n_tfs, embedding_dim]")
+        if tf_embeddings.shape[0] != n_tfs:
+            raise ValueError(
+                f"Expected {n_tfs} TF embeddings, got {tf_embeddings.shape[0]}"
+            )
+        if hidden_channels % 2 != 0:
+            raise ValueError("hidden_channels must be even for the bidirectional LSTM")
+        if hidden_channels % transformer_heads != 0:
+            raise ValueError("hidden_channels must be divisible by transformer_heads")
+        if pool_size <= 0:
+            raise ValueError("pool_size must be positive")
+
+        self.register_buffer("tf_embeddings", tf_embeddings.float())
+        embedding_dim = int(tf_embeddings.shape[1])
+
+        self.local_dna = nn.Sequential(
+            nn.Conv1d(
+                input_channels,
+                hidden_channels,
+                kernel_size=kernel_size,
+                padding="same",
+            ),
+            nn.BatchNorm1d(hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.context_pool = nn.MaxPool1d(kernel_size=pool_size, stride=pool_size)
+        self.bilstm = nn.LSTM(
+            input_size=hidden_channels,
+            hidden_size=hidden_channels // 2,
+            num_layers=lstm_layers,
+            dropout=dropout if lstm_layers > 1 else 0.0,
+            batch_first=True,
+            bidirectional=True,
+        )
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_channels,
+            nhead=transformer_heads,
+            dim_feedforward=transformer_ffn_dim,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.self_attention = nn.TransformerEncoder(encoder_layer, num_layers=1)
+        self.tf_projection = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=hidden_channels,
+            num_heads=transformer_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.cross_norm = nn.LayerNorm(hidden_channels)
+        self.tf_context_projection = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels),
+        )
+        self.position_projection = nn.Sequential(
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+        )
+        self.position_bias = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+        self.tf_bias = nn.Linear(hidden_channels, 1)
+        self.score_scale = hidden_channels ** -0.5
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        tf_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        local = self.local_dna(x)
+
+        context = self.context_pool(local).transpose(1, 2)
+        context, _ = self.bilstm(context)
+        context = self.self_attention(context)
+        global_dna = context.mean(dim=1)
+
+        tf_embeddings = self.tf_embeddings
+        if tf_indices is not None:
+            tf_embeddings = tf_embeddings.index_select(0, tf_indices)
+        tf_query = self.tf_projection(tf_embeddings)
+        tf_query = tf_query.unsqueeze(0).expand(x.shape[0], -1, -1)
+        attended, _ = self.cross_attention(
+            query=tf_query,
+            key=context,
+            value=context,
+            need_weights=False,
+        )
+        attended = self.cross_norm(attended + tf_query)
+
+        global_dna = global_dna.unsqueeze(1).expand(-1, attended.shape[1], -1)
+        tf_context = self.tf_context_projection(torch.cat([attended, global_dna], dim=-1))
+
+        position_features = self.position_projection(local)
+        logits = torch.einsum("bcl,btc->btl", position_features, tf_context)
+        logits = logits * self.score_scale
+        logits = logits + self.position_bias(local)
+        logits = logits + self.tf_bias(tf_context)
+        return logits
+
+
 class TransBindLite(nn.Module):
     """Protein-conditioned TF binding model.
 
@@ -361,6 +631,8 @@ DENSE_MODEL_NAMES = (
     "dense_small_cnn",
     "dense_res_dilated_cnn",
     "dense_protein_res_dilated_cnn",
+    "dense_protein_res_dilated_crossattention",
+    "dense_transbind_cnn_lstm_attention",
 )
 
 
@@ -457,6 +729,31 @@ def build_dense_model(
             kernel_size=kernel_size,
             dropout=dropout,
             dilations=dilations,
+        )
+    if model_name == "dense_protein_res_dilated_crossattention":
+        if tf_embeddings is None:
+            raise ValueError(
+                "dense_protein_res_dilated_crossattention requires tf_embeddings"
+            )
+        return DenseProteinResDilatedCrossAttention(
+            n_tfs=n_tfs,
+            tf_embeddings=tf_embeddings,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            dilations=dilations,
+        )
+    if model_name == "dense_transbind_cnn_lstm_attention":
+        if tf_embeddings is None:
+            raise ValueError("dense_transbind_cnn_lstm_attention requires tf_embeddings")
+        return DenseTransBindCnnLstmAttention(
+            n_tfs=n_tfs,
+            tf_embeddings=tf_embeddings,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            kernel_size=kernel_size,
+            dropout=dropout,
         )
     raise ValueError(
         f"Unknown dense model: {model_name!r}. Choose one of {DENSE_MODEL_NAMES}."

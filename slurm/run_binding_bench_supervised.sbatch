@@ -32,6 +32,7 @@ CHECKPOINT="${CHECKPOINT:-${MODEL_DIR}/best.pt}"
 REGIONS_PATH="${REGIONS_PATH:-/s/project/multispecies/fungi_code/tf_sae/processed/sequence_datasets/fungi_upstream_ATG_1000/_saccharomyces_cerevisiae_sequence_mapper.parquet}"
 
 NMS_RADIUS_BP="${NMS_RADIUS_BP:-50}"
+PEAK_CALLER="${PEAK_CALLER:-nms}"
 PRE_NMS_FACTOR="${PRE_NMS_FACTOR:-20}"
 SCORE_MODE="${SCORE_MODE:-logit}"
 FEATURE_RANK_METHOD="${FEATURE_RANK_METHOD:-max-score}"
@@ -49,6 +50,9 @@ SCAN_STRIDE="${SCAN_STRIDE:-1}"
 TOP_K_PER_TF="${TOP_K_PER_TF:-5000}"
 EXPORT_BATCH_SIZE="${EXPORT_BATCH_SIZE:-8192}"
 DEVICE="${DEVICE:-auto}"
+INFERENCE_TF_NAMES="${INFERENCE_TF_NAMES:-}"
+INFERENCE_TF_NAMES_PATH="${INFERENCE_TF_NAMES_PATH:-}"
+INFERENCE_TF_EMBEDDINGS_PATH="${INFERENCE_TF_EMBEDDINGS_PATH:-}"
 EXTRA_EXPORT_ARGS="${EXTRA_EXPORT_ARGS:-}"
 
 mkdir -p "${INPUT_DIR}" "${RUN_DIR}" "${REPO_DIR}/slurm/logs"
@@ -81,10 +85,14 @@ echo "Target dataset:       ${TARGET_DATASET}"
 echo "Scan stride:          ${SCAN_STRIDE}"
 echo "Top K per TF:         ${TOP_K_PER_TF}"
 echo "NMS radius bp:        ${NMS_RADIUS_BP}"
+echo "Peak caller:          ${PEAK_CALLER}"
 echo "Pre-NMS factor:       ${PRE_NMS_FACTOR}"
 echo "Score mode:           ${SCORE_MODE}"
 echo "Feature rank method:  ${FEATURE_RANK_METHOD}"
 echo "Device:               ${DEVICE}"
+echo "Inference TF names:   ${INFERENCE_TF_NAMES:-<checkpoint>}"
+echo "Inference TF file:    ${INFERENCE_TF_NAMES_PATH:-<none>}"
+echo "Inference TF emb:     ${INFERENCE_TF_EMBEDDINGS_PATH:-<checkpoint>}"
 
 WINDOW_ARG=()
 if [[ -n "${WINDOW_SIZE}" ]]; then
@@ -96,6 +104,17 @@ if [[ -n "${SEQUENCE_ORIENTATION}" ]]; then
     ORIENTATION_ARG=(--sequence-orientation "${SEQUENCE_ORIENTATION}")
 fi
 
+INFERENCE_ARG=()
+if [[ -n "${INFERENCE_TF_NAMES}" ]]; then
+    INFERENCE_ARG+=(--inference-tf-names "${INFERENCE_TF_NAMES}")
+fi
+if [[ -n "${INFERENCE_TF_NAMES_PATH}" ]]; then
+    INFERENCE_ARG+=(--inference-tf-names-path "${INFERENCE_TF_NAMES_PATH}")
+fi
+if [[ -n "${INFERENCE_TF_EMBEDDINGS_PATH}" ]]; then
+    INFERENCE_ARG+=(--inference-tf-embeddings-path "${INFERENCE_TF_EMBEDDINGS_PATH}")
+fi
+
 "${PYTHON_BIN}" "${EXPORT_SCRIPT}" \
     --checkpoint "${CHECKPOINT}" \
     --regions-path "${REGIONS_PATH}" \
@@ -104,6 +123,7 @@ fi
     --scan-stride "${SCAN_STRIDE}" \
     --top-k-per-tf "${TOP_K_PER_TF}" \
     --nms-radius-bp "${NMS_RADIUS_BP}" \
+    --peak-caller "${PEAK_CALLER}" \
     --pre-nms-factor "${PRE_NMS_FACTOR}" \
     --batch-size "${EXPORT_BATCH_SIZE}" \
     --device "${DEVICE}" \
@@ -111,6 +131,7 @@ fi
     --feature-rank-method "${FEATURE_RANK_METHOD}" \
     "${WINDOW_ARG[@]}" \
     "${ORIENTATION_ARG[@]}" \
+    "${INFERENCE_ARG[@]}" \
     ${EXTRA_EXPORT_ARGS}
 
 if [[ -n "${BINDING_BENCH_REPO}" && -d "${BINDING_BENCH_REPO}/src" ]]; then

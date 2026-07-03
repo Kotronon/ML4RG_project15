@@ -10,3 +10,4 @@ test.ipynb
 project15
 slurm/logs/
 baseline_evaluations/plots/
+baseline_evaluations/*.png

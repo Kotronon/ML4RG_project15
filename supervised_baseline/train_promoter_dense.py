@@ -33,7 +33,10 @@ try:
     from .tf_splits import (
         load_tf_split,
         make_all_train_tf_split,
+        make_named_holdout_tf_split,
+        make_named_similarity_holdout_tf_split,
         make_random_tf_split,
+        make_similarity_holdout_tf_split,
         normalize_tf_split,
         save_tf_split,
         tf_split_indices,
@@ -59,7 +62,10 @@ except ImportError:
     from tf_splits import (
         load_tf_split,
         make_all_train_tf_split,
+        make_named_holdout_tf_split,
+        make_named_similarity_holdout_tf_split,
         make_random_tf_split,
+        make_similarity_holdout_tf_split,
         normalize_tf_split,
         save_tf_split,
         tf_split_indices,
@@ -69,6 +75,11 @@ except ImportError:
 DEFAULT_MODEL_ROOT = Path(
     "/s/project/ml4rg_students/2026/project15/working/"
     "supervised_baseline/models"
+)
+PROTEIN_DENSE_MODEL_NAMES = (
+    "dense_protein_res_dilated_cnn",
+    "dense_protein_res_dilated_crossattention",
+    "dense_transbind_cnn_lstm_attention",
 )
 
 
@@ -86,6 +97,8 @@ class DenseEpochStats:
     val_micro_recall: float | None = None
     val_micro_f1: float | None = None
     val_predicted_positive_rate: float | None = None
+    val_average_precision: float | None = None
+    val_roc_auc: float | None = None
 
 
 @dataclass
@@ -96,6 +109,9 @@ class DenseSplitStats:
     micro_f1: float
     predicted_positive_rate: float
     n_examples: int
+    average_precision: float | None = None
+    roc_auc: float | None = None
+    per_tf: list[dict[str, object]] | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -238,11 +254,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tf-split-mode",
-        choices=("none", "random"),
+        choices=("none", "random", "named", "similarity", "named_similarity"),
         default="none",
         help=(
             "Split TF labels into train/val/test subsets. Meaningful only for "
-            "dense_protein_res_dilated_cnn."
+            "protein-conditioned dense models."
         ),
     )
     parser.add_argument(
@@ -258,17 +274,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tf-train-fraction", type=float, default=0.7)
     parser.add_argument("--tf-val-fraction", type=float, default=0.15)
     parser.add_argument(
+        "--tf-val-names",
+        default="",
+        help="Comma-separated validation TF names for --tf-split-mode named.",
+    )
+    parser.add_argument(
+        "--tf-test-names",
+        default="",
+        help="Comma-separated test TF names for --tf-split-mode named.",
+    )
+    parser.add_argument(
+        "--tf-similarity-threshold",
+        type=float,
+        default=0.9,
+        help=(
+            "Cosine-similarity threshold for --tf-split-mode similarity. TFs with "
+            "protein embedding cosine similarity at or above this value are kept "
+            "in the same split."
+        ),
+    )
+    parser.add_argument(
         "--no-pos-weight",
         action="store_true",
         help="Disable positive-class weighting in dense BCE.",
+    )
+    parser.add_argument(
+        "--selection-metric",
+        choices=(
+            "val_loss",
+            "val_average_precision",
+            "val_roc_auc",
+            "val_micro_f1",
+            "train_loss",
+        ),
+        default="val_loss",
+        help="Metric used to choose best.pt. Loss is minimized; AP/AUROC/F1 are maximized.",
     )
     parser.add_argument("--save-every", type=int, default=10)
     args = parser.parse_args()
     if args.input_mode == "embedding" and args.embeddings_path is None:
         raise ValueError("--embeddings-path is required for --input-mode embedding")
-    if args.model == "dense_protein_res_dilated_cnn" and args.tf_embeddings_path is None:
+    if args.model in PROTEIN_DENSE_MODEL_NAMES and args.tf_embeddings_path is None:
         raise ValueError(
-            "--tf-embeddings-path is required for --model dense_protein_res_dilated_cnn"
+            f"--tf-embeddings-path is required for --model {args.model}"
         )
     if (
         args.drop_missing_tf_embeddings or args.tf_name_filter_from_embeddings
@@ -276,7 +324,7 @@ def parse_args() -> argparse.Namespace:
         raise ValueError(
             "--tf-embeddings-path is required when filtering TFs to available embeddings"
         )
-    if args.tf_split_mode != "none" and args.model != "dense_protein_res_dilated_cnn":
+    if args.tf_split_mode != "none" and args.model not in PROTEIN_DENSE_MODEL_NAMES:
         raise ValueError("TF holdout splits are only meaningful for dense protein models")
     if args.eval_every < 0:
         raise ValueError("--eval-every must be non-negative")
@@ -358,7 +406,11 @@ def build_promoter_split(args: argparse.Namespace, dataset) -> dict[str, object]
     return normalize_promoter_split(raw_split, dataset.records)
 
 
-def build_tf_split(args: argparse.Namespace, dataset) -> dict[str, object]:
+def build_tf_split(
+    args: argparse.Namespace,
+    dataset,
+    tf_embeddings: torch.Tensor | None = None,
+) -> dict[str, object]:
     if args.tf_split_path is not None:
         raw_split = load_tf_split(args.tf_split_path)
     elif args.tf_split_mode == "none":
@@ -369,6 +421,38 @@ def build_tf_split(args: argparse.Namespace, dataset) -> dict[str, object]:
             seed=args.seed,
             train_fraction=args.tf_train_fraction,
             val_fraction=args.tf_val_fraction,
+        )
+    elif args.tf_split_mode == "named":
+        raw_split = make_named_holdout_tf_split(
+            dataset.tf_names,
+            val_tfs=args.tf_val_names,
+            test_tfs=args.tf_test_names,
+        )
+    elif args.tf_split_mode == "similarity":
+        if tf_embeddings is None:
+            raise ValueError("--tf-split-mode similarity requires TF protein embeddings")
+        raw_split = make_similarity_holdout_tf_split(
+            dataset.tf_names,
+            tf_embeddings.detach().cpu().numpy(),
+            seed=args.seed,
+            train_fraction=args.tf_train_fraction,
+            val_fraction=args.tf_val_fraction,
+            similarity_threshold=args.tf_similarity_threshold,
+        )
+    elif args.tf_split_mode == "named_similarity":
+        if tf_embeddings is None:
+            raise ValueError(
+                "--tf-split-mode named_similarity requires TF protein embeddings"
+            )
+        raw_split = make_named_similarity_holdout_tf_split(
+            dataset.tf_names,
+            tf_embeddings.detach().cpu().numpy(),
+            seed=args.seed,
+            val_tfs=args.tf_val_names,
+            test_tfs=args.tf_test_names,
+            train_fraction=args.tf_train_fraction,
+            val_fraction=args.tf_val_fraction,
+            similarity_threshold=args.tf_similarity_threshold,
         )
     else:
         raise ValueError(f"Unknown TF split mode: {args.tf_split_mode}")
@@ -535,6 +619,53 @@ def dense_bce_loss(
     return loss[valid].mean()
 
 
+def binary_average_precision(scores: np.ndarray, targets: np.ndarray) -> float | None:
+    targets_bool = targets.astype(bool, copy=False)
+    n_pos = int(targets_bool.sum())
+    if n_pos == 0:
+        return None
+    order = np.argsort(-scores, kind="mergesort")
+    sorted_targets = targets_bool[order]
+    tp_cumsum = np.cumsum(sorted_targets)
+    ranks = np.arange(1, len(sorted_targets) + 1, dtype=np.float64)
+    precision_at_pos = tp_cumsum[sorted_targets] / ranks[sorted_targets]
+    return float(precision_at_pos.sum() / n_pos)
+
+
+def binary_roc_auc(scores: np.ndarray, targets: np.ndarray) -> float | None:
+    targets_bool = targets.astype(bool, copy=False)
+    n_pos = int(targets_bool.sum())
+    n_neg = int(len(targets_bool) - n_pos)
+    if n_pos == 0 or n_neg == 0:
+        return None
+
+    order = np.argsort(scores, kind="mergesort")
+    sorted_scores = scores[order]
+    ranks = np.empty(len(scores), dtype=np.float64)
+    start = 0
+    while start < len(sorted_scores):
+        end = start + 1
+        while end < len(sorted_scores) and sorted_scores[end] == sorted_scores[start]:
+            end += 1
+        ranks[order[start:end]] = 0.5 * (start + 1 + end)
+        start = end
+
+    pos_rank_sum = ranks[targets_bool].sum()
+    auc = (pos_rank_sum - (n_pos * (n_pos + 1) / 2.0)) / (n_pos * n_neg)
+    return float(auc)
+
+
+def score_metrics(
+    score_chunks: list[np.ndarray],
+    target_chunks: list[np.ndarray],
+) -> tuple[float | None, float | None]:
+    if not score_chunks:
+        return None, None
+    scores = np.concatenate(score_chunks).astype(np.float64, copy=False)
+    targets = np.concatenate(target_chunks).astype(bool, copy=False)
+    return binary_average_precision(scores, targets), binary_roc_auc(scores, targets)
+
+
 def build_lr_scheduler(args: argparse.Namespace, optimizer: torch.optim.Optimizer):
     if args.lr_scheduler == "none":
         return None
@@ -688,6 +819,7 @@ def evaluate_dense(
     input_mode: str,
     pos_weight: torch.Tensor | None,
     tf_indices: torch.Tensor | None,
+    tf_names: list[str] | None = None,
 ) -> DenseSplitStats:
     model.eval()
     total_loss = 0.0
@@ -695,6 +827,22 @@ def evaluate_dense(
     tp = fp = fn = 0.0
     predicted_positive = 0.0
     total_labels = 0.0
+    micro_score_chunks: list[np.ndarray] = []
+    micro_target_chunks: list[np.ndarray] = []
+    per_tf_score_chunks: list[list[np.ndarray]] | None = None
+    per_tf_target_chunks: list[list[np.ndarray]] | None = None
+    selected_tf_names: list[str] | None = None
+
+    if tf_names is not None:
+        if tf_indices is None:
+            selected_tf_names = [str(name) for name in tf_names]
+        else:
+            selected_tf_names = [
+                str(tf_names[int(idx)])
+                for idx in tf_indices.detach().cpu().numpy().tolist()
+            ]
+        per_tf_score_chunks = [[] for _ in selected_tf_names]
+        per_tf_target_chunks = [[] for _ in selected_tf_names]
 
     with torch.no_grad():
         for batch in loader:
@@ -726,9 +874,52 @@ def evaluate_dense(
             predicted_positive += (pred & valid).sum().item()
             total_labels += valid.sum().item()
 
+            logits_cpu = logits.detach().cpu().numpy()
+            target_cpu = target.detach().cpu().numpy()
+            valid_cpu = valid.detach().cpu().numpy()
+            micro_score_chunks.append(logits_cpu[valid_cpu])
+            micro_target_chunks.append(target_cpu[valid_cpu])
+            if (
+                per_tf_score_chunks is not None
+                and per_tf_target_chunks is not None
+            ):
+                for local_tf_idx in range(logits_cpu.shape[1]):
+                    tf_valid = valid_cpu[:, local_tf_idx, :]
+                    per_tf_score_chunks[local_tf_idx].append(
+                        logits_cpu[:, local_tf_idx, :][tf_valid]
+                    )
+                    per_tf_target_chunks[local_tf_idx].append(
+                        target_cpu[:, local_tf_idx, :][tf_valid]
+                    )
+
     precision = tp / (tp + fp) if (tp + fp) else 0.0
     recall = tp / (tp + fn) if (tp + fn) else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    average_precision, roc_auc = score_metrics(micro_score_chunks, micro_target_chunks)
+    per_tf_metrics = None
+    if (
+        selected_tf_names is not None
+        and per_tf_score_chunks is not None
+        and per_tf_target_chunks is not None
+    ):
+        per_tf_metrics = []
+        for name, score_chunk, target_chunk in zip(
+            selected_tf_names,
+            per_tf_score_chunks,
+            per_tf_target_chunks,
+        ):
+            tf_ap, tf_auc = score_metrics(score_chunk, target_chunk)
+            n_pos = int(sum(chunk.astype(bool, copy=False).sum() for chunk in target_chunk))
+            n_total = int(sum(len(chunk) for chunk in target_chunk))
+            per_tf_metrics.append(
+                {
+                    "tf_name": name,
+                    "average_precision": tf_ap,
+                    "roc_auc": tf_auc,
+                    "positives": n_pos,
+                    "valid_positions": n_total,
+                }
+            )
     return DenseSplitStats(
         loss=total_loss / max(total_examples, 1),
         micro_precision=precision,
@@ -736,6 +927,9 @@ def evaluate_dense(
         micro_f1=f1,
         predicted_positive_rate=predicted_positive / max(total_labels, 1),
         n_examples=total_examples,
+        average_precision=average_precision,
+        roc_auc=roc_auc,
+        per_tf=per_tf_metrics,
     )
 
 
@@ -745,7 +939,22 @@ def attach_val_stats(stats: DenseEpochStats, val_stats: DenseSplitStats) -> Dens
     stats.val_micro_recall = val_stats.micro_recall
     stats.val_micro_f1 = val_stats.micro_f1
     stats.val_predicted_positive_rate = val_stats.predicted_positive_rate
+    stats.val_average_precision = val_stats.average_precision
+    stats.val_roc_auc = val_stats.roc_auc
     return stats
+
+
+def selection_value(stats: DenseEpochStats, metric: str) -> float | None:
+    value = getattr(stats, metric)
+    return float(value) if value is not None else None
+
+
+def selection_is_better(value: float, best_value: float | None, metric: str) -> bool:
+    if best_value is None:
+        return True
+    if metric.endswith("_loss"):
+        return value < best_value
+    return value > best_value
 
 
 def main() -> None:
@@ -765,7 +974,26 @@ def main() -> None:
 
     dataset = build_dataset(args, tf_name_filter=tf_name_filter)
     promoter_split = build_promoter_split(args, dataset)
-    tf_split = build_tf_split(args, dataset)
+    tf_embeddings = None
+    tf_embedding_metadata = None
+    if args.model in PROTEIN_DENSE_MODEL_NAMES:
+        tf_embeddings, tf_embedding_metadata = load_tf_embeddings(
+            args.tf_embeddings_path,
+            dataset.tf_names,
+            key_column=args.tf_embedding_key_column,
+            embedding_column=args.tf_embedding_column,
+            name_mapping_path=args.tf_name_map,
+        )
+        print(
+            "TF embeddings:",
+            {
+                "path": str(args.tf_embeddings_path),
+                "n_tfs": int(tf_embeddings.shape[0]),
+                "embedding_dim": int(tf_embeddings.shape[1]),
+            },
+        )
+
+    tf_split = build_tf_split(args, dataset, tf_embeddings=tf_embeddings)
     train_indices = split_indices(promoter_split, "train")
     val_indices = split_indices(promoter_split, "val")
     test_indices = split_indices(promoter_split, "test")
@@ -820,25 +1048,6 @@ def main() -> None:
         shuffle=False,
     )
 
-    tf_embeddings = None
-    tf_embedding_metadata = None
-    if args.model == "dense_protein_res_dilated_cnn":
-        tf_embeddings, tf_embedding_metadata = load_tf_embeddings(
-            args.tf_embeddings_path,
-            dataset.tf_names,
-            key_column=args.tf_embedding_key_column,
-            embedding_column=args.tf_embedding_column,
-            name_mapping_path=args.tf_name_map,
-        )
-        print(
-            "TF embeddings:",
-            {
-                "path": str(args.tf_embeddings_path),
-                "n_tfs": int(tf_embeddings.shape[0]),
-                "embedding_dim": int(tf_embeddings.shape[1]),
-            },
-        )
-
     model = build_dense_model(
         args.model,
         n_tfs=len(dataset.tf_names),
@@ -887,9 +1096,15 @@ def main() -> None:
     if tf_embedding_metadata is not None:
         save_json(args.output_dir / "tf_embedding_metadata.json", tf_embedding_metadata)
 
-    best_loss = float("inf")
     use_val_for_selection = val_loader is not None and args.eval_every > 0
-    best_metric_name = "val_loss" if use_val_for_selection else "train_loss"
+    best_metric_name = args.selection_metric
+    if best_metric_name.startswith("val_") and not use_val_for_selection:
+        print(
+            f"Selection metric {best_metric_name!r} needs validation; "
+            "falling back to 'train_loss'."
+        )
+        best_metric_name = "train_loss"
+    best_metric_value: float | None = None
     history: list[dict[str, object]] = []
     for epoch in range(1, args.epochs + 1):
         stats = train_one_epoch(
@@ -914,18 +1129,14 @@ def main() -> None:
                     input_mode=args.input_mode,
                     pos_weight=None if use_tf_holdout else pos_weight,
                     tf_indices=val_tf_tensor if use_tf_holdout else None,
+                    tf_names=dataset.tf_names,
                 ),
             )
 
-        selection_loss = (
-            stats.val_loss
-            if stats.val_loss is not None
-            else stats.train_loss
-            if not use_val_for_selection
-            else None
-        )
+        current_selection_value = selection_value(stats, best_metric_name)
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            scheduler.step(selection_loss if selection_loss is not None else stats.train_loss)
+            scheduler_value = stats.val_loss if stats.val_loss is not None else stats.train_loss
+            scheduler.step(scheduler_value)
         elif scheduler is not None:
             scheduler.step()
             stats.lr = current_lr(optimizer)
@@ -946,6 +1157,10 @@ def main() -> None:
                 f"val_micro_f1={stats.val_micro_f1:.4f} "
                 f"val_pred_pos={stats.val_predicted_positive_rate:.5f}"
             )
+            if stats.val_average_precision is not None:
+                message += f" val_ap={stats.val_average_precision:.4f}"
+            if stats.val_roc_auc is not None:
+                message += f" val_roc_auc={stats.val_roc_auc:.4f}"
         print(message)
 
         save_json(args.output_dir / "history.json", history)
@@ -962,8 +1177,12 @@ def main() -> None:
             tf_split=tf_split,
             tf_embedding_metadata=tf_embedding_metadata,
         )
-        if selection_loss is not None and selection_loss < best_loss:
-            best_loss = selection_loss
+        if current_selection_value is not None and selection_is_better(
+            current_selection_value,
+            best_metric_value,
+            best_metric_name,
+        ):
+            best_metric_value = current_selection_value
             save_checkpoint(
                 args.output_dir / "best.pt",
                 model=model,
@@ -1002,7 +1221,7 @@ def main() -> None:
 
     final_metrics: dict[str, object] = {
         "selection_metric": best_metric_name,
-        "best_loss": best_loss,
+        "best_metric_value": best_metric_value,
         "promoter_split_counts": promoter_split["counts"],
         "tf_split_counts": tf_split["counts"],
     }
@@ -1034,6 +1253,7 @@ def main() -> None:
             input_mode=args.input_mode,
             pos_weight=eval_pos_weight,
             tf_indices=split_tf_tensor,
+            tf_names=dataset.tf_names,
         )
         final_metrics[split_name] = asdict(split_stats)
     save_json(args.output_dir / "final_metrics.json", final_metrics)

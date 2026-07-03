@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -137,6 +138,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--exclude-tf-names",
+        help=(
+            "Comma-separated TF names to hold out from supervised training. "
+            "Use with transbind_lite to test protein-embedding generalization."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-tf-names-path",
+        type=Path,
+        help="File with TF names to hold out, either JSON list or one name per line.",
+    )
+    parser.add_argument(
         "--transbind-no-max-pool",
         action="store_true",
         help="Disable the early MaxPool1d layer in transbind_lite.",
@@ -200,6 +213,64 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def parse_tf_names_arg(value: str) -> list[str]:
+    names = [part.strip() for part in value.split(",") if part.strip()]
+    if not names:
+        raise ValueError("--exclude-tf-names did not contain any TF names")
+    return names
+
+
+def read_tf_names(path: Path) -> list[str]:
+    text = path.read_text().strip()
+    if not text:
+        raise ValueError(f"No TF names found in {path}")
+    if text[0] in "[{":
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            if "tf_names" in payload:
+                payload = payload["tf_names"]
+            elif "names" in payload:
+                payload = payload["names"]
+            elif "test_tf_names" in payload or "val_tf_names" in payload:
+                payload = list(payload.get("val_tf_names", [])) + list(
+                    payload.get("test_tf_names", [])
+                )
+        if not isinstance(payload, list):
+            raise ValueError(
+                "Expected a JSON list, object with tf_names/names, or TF split "
+                f"object with val_tf_names/test_tf_names, in {path}"
+            )
+        names = [str(name).strip() for name in payload if str(name).strip()]
+    else:
+        names = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    if not names:
+        raise ValueError(f"No TF names found in {path}")
+    return names
+
+
+def resolve_excluded_tf_names(args: argparse.Namespace) -> set[str]:
+    if args.exclude_tf_names and args.exclude_tf_names_path:
+        raise ValueError(
+            "Use either --exclude-tf-names or --exclude-tf-names-path, not both"
+        )
+    if args.exclude_tf_names:
+        names = parse_tf_names_arg(args.exclude_tf_names)
+    elif args.exclude_tf_names_path:
+        names = read_tf_names(args.exclude_tf_names_path)
+    else:
+        names = []
+    return {name.upper() for name in names}
+
+
+def site_tf_names(path: Path) -> set[str]:
+    table = pl.read_parquet(path, columns=["name"])
+    return {str(name).upper() for name in table.get_column("name").unique().to_list()}
 
 
 def get_device(requested: str) -> torch.device:
@@ -373,6 +444,26 @@ def main() -> None:
             args.tf_embeddings_path,
             key_column=args.tf_embedding_key_column,
             name_mapping_path=args.tf_name_map,
+        )
+    excluded_tf_names = resolve_excluded_tf_names(args)
+    if excluded_tf_names:
+        if tf_name_filter is None:
+            tf_name_filter = site_tf_names(args.sites_path)
+        before = len(tf_name_filter)
+        tf_name_filter = {
+            str(name).upper()
+            for name in tf_name_filter
+            if str(name).upper() not in excluded_tf_names
+        }
+        if not tf_name_filter:
+            raise ValueError("No TF labels remain after --exclude-tf-names filtering")
+        print(
+            "Excluded TFs:",
+            {
+                "requested": sorted(excluded_tf_names),
+                "n_training_tfs_before": before,
+                "n_training_tfs_after": len(tf_name_filter),
+            },
         )
 
     dataset = BindingBenchWindowDataset(

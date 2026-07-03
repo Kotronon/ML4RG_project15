@@ -19,8 +19,14 @@ try:
         DEFAULT_SITES_PATH,
         PromoterRecord,
     )
-    from .export_binding_bench_predictions import TopKBuffer, nms_indices, sequence_name_for_region
+    from .export_binding_bench_predictions import (
+        TopKBuffer,
+        call_peaks_indices,
+        nms_indices,
+        sequence_name_for_region,
+    )
     from .model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations
+    from .tf_embeddings import load_tf_embeddings
     from .train_promoter_dense import collate_promoter_batch, prepare_x
 except ImportError:
     from dataset import (
@@ -30,13 +36,24 @@ except ImportError:
         DEFAULT_SITES_PATH,
         PromoterRecord,
     )
-    from export_binding_bench_predictions import TopKBuffer, nms_indices, sequence_name_for_region
+    from export_binding_bench_predictions import (
+        TopKBuffer,
+        call_peaks_indices,
+        nms_indices,
+        sequence_name_for_region,
+    )
     from model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations
+    from tf_embeddings import load_tf_embeddings
     from train_promoter_dense import collate_promoter_batch, prepare_x
 
 
 DEFAULT_PROJECT = Path("/s/project/ml4rg_students/2026/project15")
 DEFAULT_INPUT_DIR = DEFAULT_PROJECT / "working/binding_bench_inputs"
+PROTEIN_DENSE_MODEL_NAMES = (
+    "dense_protein_res_dilated_cnn",
+    "dense_protein_res_dilated_crossattention",
+    "dense_transbind_cnn_lstm_attention",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,6 +78,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--embedding-column", help="Override checkpoint embedding column.")
     parser.add_argument("--embedding-key-column", help="Override checkpoint embedding key column.")
+    parser.add_argument(
+        "--tf-embeddings-path",
+        type=Path,
+        help="Override checkpoint protein embeddings path for dense protein models.",
+    )
+    parser.add_argument("--tf-embedding-key-column")
+    parser.add_argument("--tf-embedding-column")
+    parser.add_argument("--tf-name-map", type=Path)
     parser.add_argument("--predictions-out", type=Path, required=True)
     parser.add_argument("--feature-ranks-out", type=Path, required=True)
     parser.add_argument(
@@ -82,6 +107,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Use 0 for the clean dense-position baseline; set e.g. 50 for peak collapse.",
+    )
+    parser.add_argument(
+        "--peak-caller",
+        choices=("nms", "scipy-find-peaks"),
+        default="nms",
+        help=(
+            "Choose dense positions with greedy NMS or scipy.signal.find_peaks "
+            "before top-K export."
+        ),
     )
     parser.add_argument(
         "--pre-nms-factor",
@@ -187,6 +221,27 @@ def resolve_export_config(
         if args.embedding_key_column is not None
         else saved_config.get("embedding_key_column", saved_args.get("embedding_key_column"))
     )
+    tf_embeddings_path = args.tf_embeddings_path
+    if tf_embeddings_path is None:
+        saved_tf_embedding = saved_config.get(
+            "tf_embeddings_path", saved_args.get("tf_embeddings_path")
+        )
+        tf_embeddings_path = Path(str(saved_tf_embedding)) if saved_tf_embedding else None
+    tf_embedding_key_column = (
+        args.tf_embedding_key_column
+        if args.tf_embedding_key_column is not None
+        else saved_config.get(
+            "tf_embedding_key_column", saved_args.get("tf_embedding_key_column")
+        )
+    )
+    tf_embedding_column = str(
+        args.tf_embedding_column
+        or saved_config.get("tf_embedding_column", saved_args.get("tf_embedding_column", "emb"))
+    )
+    tf_name_map = args.tf_name_map
+    if tf_name_map is None:
+        saved_tf_name_map = saved_config.get("tf_name_map", saved_args.get("tf_name_map"))
+        tf_name_map = Path(str(saved_tf_name_map)) if saved_tf_name_map else None
     min_sites_per_tf = int(
         args.min_sites_per_tf
         if args.min_sites_per_tf is not None
@@ -210,6 +265,11 @@ def resolve_export_config(
             "Checkpoint/input mode is embedding but no embeddings path was saved. "
             "Pass --embeddings-path."
         )
+    if model_name in PROTEIN_DENSE_MODEL_NAMES and tf_embeddings_path is None:
+        raise ValueError(
+            f"Checkpoint/model is {model_name} but no protein embedding path "
+            "was saved. Pass --tf-embeddings-path."
+        )
 
     return {
         "input_mode": input_mode,
@@ -223,18 +283,27 @@ def resolve_export_config(
         "embeddings_path": embeddings_path,
         "embedding_column": embedding_column,
         "embedding_key_column": embedding_key_column,
+        "tf_embeddings_path": tf_embeddings_path,
+        "tf_embedding_key_column": tf_embedding_key_column,
+        "tf_embedding_column": tf_embedding_column,
+        "tf_name_map": tf_name_map,
         "min_sites_per_tf": min_sites_per_tf,
         "sequence_orientation": sequence_orientation,
         "trim_terminal_atg": trim_terminal_atg,
     }
 
 
-def build_dataset(config: dict[str, object], max_regions: int | None):
+def build_dataset(
+    config: dict[str, object],
+    max_regions: int | None,
+    tf_name_filter: set[str] | None = None,
+):
     common = {
         "sites_path": config["sites_path"],
         "regions_path": config["regions_path"],
         "min_sites_per_tf": int(config["min_sites_per_tf"]),
         "sequence_orientation": str(config["sequence_orientation"]),
+        "tf_name_filter": tf_name_filter,
         "max_regions": max_regions,
         "trim_terminal_atg": bool(config["trim_terminal_atg"]),
     }
@@ -345,6 +414,7 @@ def write_outputs(
     nms_radius_bp: int,
     top_k_per_tf: int,
     feature_rank_method: str,
+    peak_caller: str,
 ) -> None:
     prediction_frames = []
     feature_scores = []
@@ -363,13 +433,24 @@ def write_outputs(
         chrom_codes_raw = topk.chrom_codes[valid, feature_idx]
         region_codes_raw = topk.region_codes[valid, feature_idx]
         scores_raw = scores[valid]
-        keep = nms_indices(
-            chrom_codes=chrom_codes_raw,
-            starts=starts_raw,
-            scores=scores_raw,
-            radius_bp=nms_radius_bp,
-            max_keep=top_k_per_tf,
-        )
+        if peak_caller == "nms":
+            keep = nms_indices(
+                chrom_codes=chrom_codes_raw,
+                starts=starts_raw,
+                scores=scores_raw,
+                radius_bp=nms_radius_bp,
+                max_keep=top_k_per_tf,
+            )
+        elif peak_caller == "scipy-find-peaks":
+            keep = call_peaks_indices(
+                chrom_codes=chrom_codes_raw,
+                starts=starts_raw,
+                scores=scores_raw,
+                radius_bp=nms_radius_bp,
+                max_keep=top_k_per_tf,
+            )
+        else:
+            raise ValueError(f"Unknown peak caller: {peak_caller}")
         starts = starts_raw[keep]
         chrom_codes = chrom_codes_raw[keep]
         region_codes = region_codes_raw[keep]
@@ -482,7 +563,8 @@ def main() -> None:
         raise ValueError(f"Checkpoint has no tf_names list: {args.checkpoint}")
 
     config = resolve_export_config(args, checkpoint)
-    dataset = build_dataset(config, args.max_regions)
+    checkpoint_tf_filter = {str(name).upper() for name in tf_names}
+    dataset = build_dataset(config, args.max_regions, tf_name_filter=checkpoint_tf_filter)
     if [str(name) for name in dataset.tf_names] != [str(name) for name in tf_names]:
         raise ValueError(
             "Dataset TF order does not match checkpoint TF order. "
@@ -495,10 +577,20 @@ def main() -> None:
             infer_input_channels(dataset, str(config["input_mode"])),
         )
     )
+    tf_embeddings = None
+    if config["model_name"] in PROTEIN_DENSE_MODEL_NAMES:
+        tf_embeddings, _ = load_tf_embeddings(
+            config["tf_embeddings_path"],
+            tf_names,
+            key_column=config["tf_embedding_key_column"],
+            embedding_column=str(config["tf_embedding_column"]),
+            name_mapping_path=config["tf_name_map"],
+        )
     model = build_dense_model(
         str(config["model_name"]),
         n_tfs=len(tf_names),
         input_channels=input_channels,
+        tf_embeddings=tf_embeddings,
         hidden_channels=int(config["hidden_channels"]),
         kernel_size=int(config["kernel_size"]),
         dropout=float(config["dropout"]),
@@ -535,11 +627,14 @@ def main() -> None:
     print(f"Device:               {device}")
     print(f"Model:                {config['model_name']}")
     print(f"Input mode:           {config['input_mode']}")
+    if config["model_name"] in PROTEIN_DENSE_MODEL_NAMES:
+        print(f"TF embeddings:        {config['tf_embeddings_path']}")
     print(f"TF outputs:           {len(tf_names)}")
     print(f"Promoters:            {len(dataset)}")
     print(f"Top K per TF:         {args.top_k_per_tf}")
     print(f"Pre-NMS candidates:   {candidate_k}")
     print(f"NMS radius bp:        {args.nms_radius_bp}")
+    print(f"Peak caller:          {args.peak_caller}")
     print(f"Score mode:           {args.score_mode}")
     print(f"Feature rank method:  {args.feature_rank_method}")
 
@@ -575,6 +670,7 @@ def main() -> None:
         nms_radius_bp=args.nms_radius_bp,
         top_k_per_tf=args.top_k_per_tf,
         feature_rank_method=args.feature_rank_method,
+        peak_caller=args.peak_caller,
     )
 
     metadata = {
@@ -591,6 +687,7 @@ def main() -> None:
         "pre_nms_factor": args.pre_nms_factor,
         "candidate_k_per_tf": candidate_k,
         "nms_radius_bp": args.nms_radius_bp,
+        "peak_caller": args.peak_caller,
         "score_mode": args.score_mode,
         "feature_rank_method": args.feature_rank_method,
         "n_scored_positions": n_scored_positions,
@@ -600,6 +697,12 @@ def main() -> None:
             "sites_path": str(config["sites_path"]),
             "regions_path": str(config["regions_path"]),
             "embeddings_path": str(config["embeddings_path"]) if config["embeddings_path"] else None,
+            "tf_embeddings_path": (
+                str(config["tf_embeddings_path"])
+                if config["tf_embeddings_path"]
+                else None
+            ),
+            "tf_name_map": str(config["tf_name_map"]) if config["tf_name_map"] else None,
             "dilations": list(config["dilations"]),
         },
     }

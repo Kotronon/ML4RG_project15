@@ -32,6 +32,7 @@ MODEL_DIR="${MODEL_DIR:-${PROJECT}/working/supervised_baseline/models/promoter_$
 CHECKPOINT="${CHECKPOINT:-${MODEL_DIR}/best.pt}"
 
 NMS_RADIUS_BP="${NMS_RADIUS_BP:-0}"
+PEAK_CALLER="${PEAK_CALLER:-nms}"
 PRE_NMS_FACTOR="${PRE_NMS_FACTOR:-20}"
 SCORE_MODE="${SCORE_MODE:-logit}"
 FEATURE_RANK_METHOD="${FEATURE_RANK_METHOD:-max-score}"
@@ -85,6 +86,7 @@ echo "Run dir:              ${RUN_DIR}"
 echo "Target dataset:       ${TARGET_DATASET}"
 echo "Top K per TF:         ${TOP_K_PER_TF}"
 echo "NMS radius bp:        ${NMS_RADIUS_BP}"
+echo "Peak caller:          ${PEAK_CALLER}"
 echo "Pre-NMS factor:       ${PRE_NMS_FACTOR}"
 echo "Score mode:           ${SCORE_MODE}"
 echo "Feature rank method:  ${FEATURE_RANK_METHOD}"
@@ -123,6 +125,7 @@ fi
     --feature-ranks-out "${FEATURE_RANKS}" \
     --top-k-per-tf "${TOP_K_PER_TF}" \
     --nms-radius-bp "${NMS_RADIUS_BP}" \
+    --peak-caller "${PEAK_CALLER}" \
     --pre-nms-factor "${PRE_NMS_FACTOR}" \
     --batch-size "${EXPORT_BATCH_SIZE}" \
     --num-workers "${NUM_WORKERS}" \

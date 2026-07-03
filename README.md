@@ -107,6 +107,27 @@ OUTPUT_DIR=/s/project/ml4rg_students/2026/project15/working/supervised_baseline/
 sbatch slurm/train_promoter_dense.sbatch
 ```
 
+For a TransBind-style variant that keeps the local ResDilated peak scorer as
+the main path and adds protein-query cross-attention as a residual context
+branch, use:
+
+```bash
+INPUT_MODE=embedding \
+EMBEDDINGS_PATH=/s/project/ml4rg_students/2026/project15/raw/embeddings/other_models/specieslm_v1/_saccharomyces_cerevisiae/embs_ds_fungi_upstream_ATG_1000_l11.npy \
+TF_EMBEDDINGS_PATH=/s/project/ml4rg_students/2026/project15/working/protein_embeddings/scer_esm2_tf_emb.parquet \
+TF_EMBEDDING_KEY_COLUMN=gene \
+DROP_MISSING_TF_EMBEDDINGS=true \
+MODEL=dense_protein_res_dilated_crossattention \
+PROMOTER_SPLIT_MODE=chromosome \
+VAL_CHROMS=VII \
+TEST_CHROMS=VIII,IX \
+TF_SPLIT_MODE=similarity \
+TF_SIMILARITY_THRESHOLD=0.9 \
+SELECTION_METRIC=val_average_precision \
+OUTPUT_DIR=/s/project/ml4rg_students/2026/project15/working/supervised_baseline/models/promoter_embedding_resdilated_crossattention_similarity_ap \
+sbatch slurm/train_promoter_dense.sbatch
+```
+
 Evaluate a trained dense promoter checkpoint with Binding Bench:
 
 ```bash

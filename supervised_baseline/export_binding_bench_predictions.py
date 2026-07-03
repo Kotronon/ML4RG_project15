@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import torch
+from scipy.signal import find_peaks
 from tqdm import tqdm
 
 try:
@@ -87,6 +88,29 @@ def parse_args() -> argparse.Namespace:
         help="Override JSON mapping from checkpoint TF labels to embedding-table keys.",
     )
     parser.add_argument(
+        "--inference-tf-names",
+        help=(
+            "Comma-separated TF names to score instead of the checkpoint TF list. "
+            "Only supported for transbind_lite checkpoints trained without TF bias."
+        ),
+    )
+    parser.add_argument(
+        "--inference-tf-names-path",
+        type=Path,
+        help=(
+            "File with TF names to score instead of the checkpoint TF list. "
+            "Accepts JSON list or one name per line."
+        ),
+    )
+    parser.add_argument(
+        "--inference-tf-embeddings-path",
+        type=Path,
+        help=(
+            "Protein embeddings parquet for inference TFs. Defaults to "
+            "--tf-embeddings-path or the checkpoint embedding path."
+        ),
+    )
+    parser.add_argument(
         "--transbind-no-max-pool",
         action="store_true",
         help="Override checkpoint config and disable transbind_lite early max pooling.",
@@ -121,6 +145,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Collapse nearby high-scoring centers per TF before export. "
             "Use 0 to disable non-maximum suppression."
+        ),
+    )
+    parser.add_argument(
+        "--peak-caller",
+        choices=("nms", "scipy-find-peaks"),
+        default="nms",
+        help=(
+            "Choose dense positions with greedy NMS or scipy.signal.find_peaks "
+            "before top-K export."
         ),
     )
     parser.add_argument(
@@ -170,6 +203,79 @@ def checkpoint_arg(checkpoint: dict[str, object], name: str, default: object) ->
     if isinstance(args, dict):
         return args.get(name, default)
     return default
+
+
+def parse_tf_names_arg(value: str) -> list[str]:
+    names = [part.strip() for part in value.split(",") if part.strip()]
+    if not names:
+        raise ValueError("--inference-tf-names did not contain any TF names")
+    return names
+
+
+def read_tf_names(path: Path) -> list[str]:
+    text = path.read_text().strip()
+    if not text:
+        raise ValueError(f"No TF names found in {path}")
+    if text[0] in "[{":
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            if "tf_names" in payload:
+                payload = payload["tf_names"]
+            elif "names" in payload:
+                payload = payload["names"]
+            elif "test_tf_names" in payload:
+                payload = payload["test_tf_names"]
+        if not isinstance(payload, list):
+            raise ValueError(
+                "Expected a JSON list, object with tf_names/names, or TF split "
+                f"object with test_tf_names, in {path}"
+            )
+        names = [str(name).strip() for name in payload if str(name).strip()]
+    else:
+        names = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    if not names:
+        raise ValueError(f"No TF names found in {path}")
+    return names
+
+
+def resolve_inference_tf_names(
+    args: argparse.Namespace,
+    checkpoint_tf_names: list[object],
+) -> list[str]:
+    if args.inference_tf_names and args.inference_tf_names_path:
+        raise ValueError(
+            "Use either --inference-tf-names or --inference-tf-names-path, not both"
+        )
+    if args.inference_tf_names:
+        return parse_tf_names_arg(args.inference_tf_names)
+    if args.inference_tf_names_path:
+        return read_tf_names(args.inference_tf_names_path)
+    return [str(name) for name in checkpoint_tf_names]
+
+
+def load_checkpoint_state_for_inference(
+    checkpoint: dict[str, object],
+    *,
+    use_checkpoint_tf_names: bool,
+    transbind_tf_bias: bool,
+) -> dict[str, torch.Tensor]:
+    state = checkpoint["model_state_dict"]
+    if not isinstance(state, dict):
+        raise ValueError("Checkpoint has no model_state_dict")
+    state = dict(state)
+    if use_checkpoint_tf_names:
+        return state
+    state.pop("tf_embeddings", None)
+    if transbind_tf_bias:
+        raise ValueError(
+            "Cannot change inference TF names for a transbind_lite checkpoint "
+            "with learned TF bias. Train/export with TRANSBIND_TF_BIAS=false."
+        )
+    return state
 
 
 def checkpoint_model_config(checkpoint: dict[str, object]) -> dict[str, object]:
@@ -373,6 +479,55 @@ def nms_indices(
     return np.asarray(selected, dtype=np.int64)
 
 
+def call_peaks_indices(
+    *,
+    chrom_codes: np.ndarray,
+    starts: np.ndarray,
+    scores: np.ndarray,
+    radius_bp: int,
+    max_keep: int,
+) -> np.ndarray:
+    peak_indices = []
+    for chrom_code in np.unique(chrom_codes):
+        chrom_idx = np.flatnonzero(chrom_codes == chrom_code)
+        start_order = np.argsort(starts[chrom_idx], kind="mergesort")
+        sorted_idx = chrom_idx[start_order]
+        sorted_scores = scores[sorted_idx]
+        padded_scores = np.concatenate(
+            [
+                np.asarray([-np.inf], dtype=sorted_scores.dtype),
+                sorted_scores,
+                np.asarray([-np.inf], dtype=sorted_scores.dtype),
+            ]
+        )
+        local_peaks, _ = find_peaks(padded_scores)
+        local_peaks = local_peaks - 1
+        local_peaks = local_peaks[
+            (local_peaks >= 0) & (local_peaks < len(sorted_idx))
+        ]
+        if len(local_peaks):
+            peak_indices.append(sorted_idx[local_peaks])
+
+    if not peak_indices:
+        return nms_indices(
+            chrom_codes=chrom_codes,
+            starts=starts,
+            scores=scores,
+            radius_bp=radius_bp,
+            max_keep=max_keep,
+        )
+
+    candidate_idx = np.concatenate(peak_indices)
+    keep_local = nms_indices(
+        chrom_codes=chrom_codes[candidate_idx],
+        starts=starts[candidate_idx],
+        scores=scores[candidate_idx],
+        radius_bp=radius_bp,
+        max_keep=max_keep,
+    )
+    return candidate_idx[keep_local]
+
+
 def read_regions(path: Path, max_regions: int | None) -> list[dict[str, object]]:
     regions = pl.read_parquet(path).select("chrom", "start", "end", "strand", "seq", "gene_id")
     regions = regions.with_columns(
@@ -472,6 +627,7 @@ def write_outputs(
     top_k_per_tf: int,
     window_size: int,
     feature_rank_method: str,
+    peak_caller: str,
 ) -> None:
     prediction_frames = []
     feature_scores = []
@@ -491,13 +647,24 @@ def write_outputs(
         chrom_codes_raw = topk.chrom_codes[valid, feature_idx]
         region_codes_raw = topk.region_codes[valid, feature_idx]
         scores_raw = scores[valid]
-        keep = nms_indices(
-            chrom_codes=chrom_codes_raw,
-            starts=starts_raw,
-            scores=scores_raw,
-            radius_bp=nms_radius_bp,
-            max_keep=top_k_per_tf,
-        )
+        if peak_caller == "nms":
+            keep = nms_indices(
+                chrom_codes=chrom_codes_raw,
+                starts=starts_raw,
+                scores=scores_raw,
+                radius_bp=nms_radius_bp,
+                max_keep=top_k_per_tf,
+            )
+        elif peak_caller == "scipy-find-peaks":
+            keep = call_peaks_indices(
+                chrom_codes=chrom_codes_raw,
+                starts=starts_raw,
+                scores=scores_raw,
+                radius_bp=nms_radius_bp,
+                max_keep=top_k_per_tf,
+            )
+        else:
+            raise ValueError(f"Unknown peak caller: {peak_caller}")
         starts = starts_raw[keep]
         chrom_codes = chrom_codes_raw[keep]
         region_codes = region_codes_raw[keep]
@@ -607,9 +774,11 @@ def main() -> None:
 
     device = get_device(args.device)
     checkpoint = load_checkpoint(args.checkpoint, device)
-    tf_names = checkpoint.get("tf_names")
-    if not isinstance(tf_names, list) or not tf_names:
+    checkpoint_tf_names = checkpoint.get("tf_names")
+    if not isinstance(checkpoint_tf_names, list) or not checkpoint_tf_names:
         raise ValueError(f"Checkpoint has no tf_names list: {args.checkpoint}")
+    tf_names = resolve_inference_tf_names(args, checkpoint_tf_names)
+    use_checkpoint_tf_names = tf_names == [str(name) for name in checkpoint_tf_names]
 
     window_size = args.window_size or int(checkpoint_arg(checkpoint, "window_size", 101))
     if window_size <= 0 or window_size % 2 == 0:
@@ -622,8 +791,12 @@ def main() -> None:
 
     model_config = resolve_model_config(args, checkpoint)
     tf_embeddings = None
+    inference_tf_embeddings_path = None
     if model_config["model_name"] == "transbind_lite":
-        tf_embeddings_path = model_config["tf_embeddings_path"]
+        tf_embeddings_path = (
+            args.inference_tf_embeddings_path or model_config["tf_embeddings_path"]
+        )
+        inference_tf_embeddings_path = tf_embeddings_path
         if tf_embeddings_path is None:
             raise ValueError(
                 "Checkpoint uses transbind_lite but no TF embeddings path was saved. "
@@ -635,6 +808,10 @@ def main() -> None:
             key_column=model_config["tf_embedding_key_column"],
             embedding_column=str(model_config["tf_embedding_column"]),
             name_mapping_path=model_config["tf_name_map"],
+        )
+    elif not use_checkpoint_tf_names:
+        raise ValueError(
+            "--inference-tf-names is only supported for transbind_lite checkpoints"
         )
     model = build_model(
         str(model_config["model_name"]),
@@ -649,7 +826,12 @@ def main() -> None:
         transbind_use_max_pool=bool(model_config["transbind_use_max_pool"]),
         transbind_tf_bias=bool(model_config["transbind_tf_bias"]),
     ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    checkpoint_state = load_checkpoint_state_for_inference(
+        checkpoint,
+        use_checkpoint_tf_names=use_checkpoint_tf_names,
+        transbind_tf_bias=bool(model_config["transbind_tf_bias"]),
+    )
+    model.load_state_dict(checkpoint_state, strict=use_checkpoint_tf_names)
     model.eval()
 
     regions = read_regions(args.regions_path, args.max_regions)
@@ -674,12 +856,16 @@ def main() -> None:
     print(f"Device:               {device}")
     print(f"Model:                {model_config['model_name']}")
     print(f"TF outputs:           {len(tf_names)}")
+    if not use_checkpoint_tf_names:
+        print("Inference TFs:        custom")
+        print(f"Inference embeddings: {inference_tf_embeddings_path}")
     print(f"Window size:          {window_size}")
     print(f"Sequence orientation: {sequence_orientation}")
     print(f"Scan stride:          {args.scan_stride}")
     print(f"Top K per TF:         {args.top_k_per_tf}")
     print(f"Pre-NMS candidates:   {candidate_k}")
     print(f"NMS radius bp:        {args.nms_radius_bp}")
+    print(f"Peak caller:          {args.peak_caller}")
     print(f"Score mode:           {args.score_mode}")
     print(f"Feature rank method:  {args.feature_rank_method}")
 
@@ -758,6 +944,7 @@ def main() -> None:
         top_k_per_tf=args.top_k_per_tf,
         window_size=window_size,
         feature_rank_method=args.feature_rank_method,
+        peak_caller=args.peak_caller,
     )
 
     metadata = {
@@ -770,10 +957,17 @@ def main() -> None:
         "pre_nms_factor": args.pre_nms_factor,
         "candidate_k_per_tf": candidate_k,
         "nms_radius_bp": args.nms_radius_bp,
+        "peak_caller": args.peak_caller,
         "score_mode": args.score_mode,
         "feature_rank_method": args.feature_rank_method,
         "n_scanned_windows": n_scanned,
         "n_tfs": len(tf_names),
+        "checkpoint_n_tfs": len(checkpoint_tf_names),
+        "uses_checkpoint_tf_names": use_checkpoint_tf_names,
+        "tf_names": [str(name) for name in tf_names],
+        "inference_tf_embeddings_path": (
+            str(inference_tf_embeddings_path) if inference_tf_embeddings_path else None
+        ),
         "model_config": {
             **model_config,
             "dilations": list(model_config["dilations"]),

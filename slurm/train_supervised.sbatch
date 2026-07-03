@@ -41,6 +41,8 @@ TF_EMBEDDING_KEY_COLUMN="${TF_EMBEDDING_KEY_COLUMN:-}"
 TF_EMBEDDING_COLUMN="${TF_EMBEDDING_COLUMN:-emb}"
 TF_NAME_MAP="${TF_NAME_MAP:-}"
 TF_NAME_FILTER_FROM_EMBEDDINGS="${TF_NAME_FILTER_FROM_EMBEDDINGS:-false}"
+EXCLUDE_TF_NAMES="${EXCLUDE_TF_NAMES:-}"
+EXCLUDE_TF_NAMES_PATH="${EXCLUDE_TF_NAMES_PATH:-}"
 TRANSBIND_NO_MAX_POOL="${TRANSBIND_NO_MAX_POOL:-false}"
 TRANSBIND_TF_BIAS="${TRANSBIND_TF_BIAS:-false}"
 EPOCHS="${EPOCHS:-100}"
@@ -96,6 +98,8 @@ echo "TF embedding key:     ${TF_EMBEDDING_KEY_COLUMN:-<auto>}"
 echo "TF embedding column:  ${TF_EMBEDDING_COLUMN}"
 echo "TF name map:          ${TF_NAME_MAP:-<none>}"
 echo "Filter TFs to emb:    ${TF_NAME_FILTER_FROM_EMBEDDINGS}"
+echo "Exclude TF names:     ${EXCLUDE_TF_NAMES:-<none>}"
+echo "Exclude TF file:      ${EXCLUDE_TF_NAMES_PATH:-<none>}"
 echo "TransBind no pool:    ${TRANSBIND_NO_MAX_POOL}"
 echo "TransBind TF bias:    ${TRANSBIND_TF_BIAS}"
 echo "Epochs:               ${EPOCHS}"
@@ -111,6 +115,12 @@ echo "Extra args:           ${EXTRA_ARGS}"
 OPTIONAL_ARGS=()
 if [[ "${TF_NAME_FILTER_FROM_EMBEDDINGS}" == "true" ]]; then
     OPTIONAL_ARGS+=(--tf-name-filter-from-embeddings)
+fi
+if [[ -n "${EXCLUDE_TF_NAMES}" ]]; then
+    OPTIONAL_ARGS+=(--exclude-tf-names "${EXCLUDE_TF_NAMES}")
+fi
+if [[ -n "${EXCLUDE_TF_NAMES_PATH}" ]]; then
+    OPTIONAL_ARGS+=(--exclude-tf-names-path "${EXCLUDE_TF_NAMES_PATH}")
 fi
 if [[ "${TRANSBIND_NO_MAX_POOL}" == "true" ]]; then
     OPTIONAL_ARGS+=(--transbind-no-max-pool)
