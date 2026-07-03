@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class smallCNN(nn.Module):
@@ -291,6 +292,9 @@ class DenseProteinResDilatedCrossAttention(nn.Module):
         kernel_size: int = 7,
         dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
         dropout: float = 0.1,
+        tf_embedding_dropout: float = 0.0,
+        cross_attention_gate_logit_init: float = -3.0,
+        cross_attention_context_pool_sizes: tuple[int, ...] = (4,),
     ) -> None:
         super().__init__()
         if tf_embeddings.ndim != 2:
@@ -299,8 +303,15 @@ class DenseProteinResDilatedCrossAttention(nn.Module):
             raise ValueError(
                 f"Expected {n_tfs} TF embeddings, got {tf_embeddings.shape[0]}"
             )
+        if not 0.0 <= tf_embedding_dropout < 1.0:
+            raise ValueError("tf_embedding_dropout must be in [0, 1)")
+        if not cross_attention_context_pool_sizes:
+            raise ValueError("cross_attention_context_pool_sizes must not be empty")
+        if any(size <= 0 for size in cross_attention_context_pool_sizes):
+            raise ValueError("cross_attention_context_pool_sizes must be positive")
 
         self.register_buffer("tf_embeddings", tf_embeddings.float())
+        self.tf_embedding_dropout = float(tf_embedding_dropout)
         embedding_dim = int(tf_embeddings.shape[1])
         self.stem = nn.Sequential(
             nn.Conv1d(input_channels, hidden_channels, kernel_size=15, padding=7),
@@ -334,7 +345,12 @@ class DenseProteinResDilatedCrossAttention(nn.Module):
         self.dna_bias = nn.Conv1d(hidden_channels, 1, kernel_size=1)
         self.tf_bias = nn.Linear(hidden_channels, 1)
 
-        self.context_pool = nn.MaxPool1d(kernel_size=4, stride=4)
+        self.context_pools = nn.ModuleList(
+            [
+                nn.MaxPool1d(kernel_size=size, stride=size)
+                for size in cross_attention_context_pool_sizes
+            ]
+        )
         num_heads = min(8, hidden_channels)
         while hidden_channels % num_heads != 0:
             num_heads -= 1
@@ -357,7 +373,9 @@ class DenseProteinResDilatedCrossAttention(nn.Module):
             nn.Dropout(dropout),
             nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
         )
-        self.attention_log_scale = nn.Parameter(torch.tensor(-3.0))
+        self.attention_log_scale = nn.Parameter(
+            torch.tensor(float(cross_attention_gate_logit_init))
+        )
         self.score_scale = hidden_channels ** -0.5
 
     def forward(
@@ -373,6 +391,12 @@ class DenseProteinResDilatedCrossAttention(nn.Module):
         tf_embeddings = self.tf_embeddings
         if tf_indices is not None:
             tf_embeddings = tf_embeddings.index_select(0, tf_indices)
+        if self.training and self.tf_embedding_dropout > 0.0:
+            tf_embeddings = F.dropout(
+                tf_embeddings,
+                p=self.tf_embedding_dropout,
+                training=True,
+            )
         tf_features = self.tf_projection(tf_embeddings)
 
         dna_features = self.dna_projection(dna)
@@ -381,7 +405,10 @@ class DenseProteinResDilatedCrossAttention(nn.Module):
         local_logits = local_logits + self.dna_bias(dna)
         local_logits = local_logits + self.tf_bias(tf_features).view(1, -1, 1)
 
-        context = self.context_pool(dna).transpose(1, 2)
+        context = torch.cat(
+            [pool(dna).transpose(1, 2) for pool in self.context_pools],
+            dim=1,
+        )
         tf_query = tf_features.unsqueeze(0).expand(x.shape[0], -1, -1)
         attended, _ = self.cross_attention(
             query=tf_query,
@@ -701,6 +728,9 @@ def build_dense_model(
     kernel_size: int = 7,
     dropout: float = 0.1,
     dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+    tf_embedding_dropout: float = 0.0,
+    cross_attention_gate_logit_init: float = -3.0,
+    cross_attention_context_pool_sizes: tuple[int, ...] = (4,),
 ) -> nn.Module:
     if model_name == "dense_small_cnn":
         return DenseSmallCNN(
@@ -743,6 +773,9 @@ def build_dense_model(
             kernel_size=kernel_size,
             dropout=dropout,
             dilations=dilations,
+            tf_embedding_dropout=tf_embedding_dropout,
+            cross_attention_gate_logit_init=cross_attention_gate_logit_init,
+            cross_attention_context_pool_sizes=cross_attention_context_pool_sizes,
         )
     if model_name == "dense_transbind_cnn_lstm_attention":
         if tf_embeddings is None:

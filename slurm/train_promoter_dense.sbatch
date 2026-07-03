@@ -46,6 +46,9 @@ HIDDEN_CHANNELS="${HIDDEN_CHANNELS:-128}"
 KERNEL_SIZE="${KERNEL_SIZE:-7}"
 DILATIONS="${DILATIONS:-1,2,4,8,16}"
 DROPOUT="${DROPOUT:-0.1}"
+TF_EMBEDDING_DROPOUT="${TF_EMBEDDING_DROPOUT:-0.0}"
+CROSS_ATTENTION_GATE_LOGIT_INIT="${CROSS_ATTENTION_GATE_LOGIT_INIT:--3.0}"
+CROSS_ATTENTION_CONTEXT_POOL_SIZES="${CROSS_ATTENTION_CONTEXT_POOL_SIZES:-4}"
 EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 LR="${LR:-0.001}"
@@ -119,6 +122,9 @@ echo "Hidden channels:      ${HIDDEN_CHANNELS}"
 echo "Kernel size:          ${KERNEL_SIZE}"
 echo "Dilations:            ${DILATIONS}"
 echo "Dropout:              ${DROPOUT}"
+echo "TF emb dropout:       ${TF_EMBEDDING_DROPOUT}"
+echo "CrossAttn gate init:  ${CROSS_ATTENTION_GATE_LOGIT_INIT}"
+echo "CrossAttn pools:      ${CROSS_ATTENTION_CONTEXT_POOL_SIZES}"
 echo "Epochs:               ${EPOCHS}"
 echo "Batch size:           ${BATCH_SIZE}"
 echo "LR:                   ${LR}"
@@ -207,6 +213,9 @@ fi
     --kernel-size "${KERNEL_SIZE}" \
     --dilations "${DILATIONS}" \
     --dropout "${DROPOUT}" \
+    --tf-embedding-dropout "${TF_EMBEDDING_DROPOUT}" \
+    --cross-attention-gate-logit-init "${CROSS_ATTENTION_GATE_LOGIT_INIT}" \
+    --cross-attention-context-pool-sizes "${CROSS_ATTENTION_CONTEXT_POOL_SIZES}" \
     --epochs "${EPOCHS}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \

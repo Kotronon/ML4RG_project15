@@ -200,6 +200,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kernel-size", type=int, default=7)
     parser.add_argument("--dilations", default="1,2,4,8,16")
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--tf-embedding-dropout",
+        type=float,
+        default=0.0,
+        help=(
+            "Drop probability applied to TF protein embeddings during training "
+            "for dense_protein_res_dilated_crossattention."
+        ),
+    )
+    parser.add_argument(
+        "--cross-attention-gate-logit-init",
+        type=float,
+        default=-3.0,
+        help=(
+            "Initial logit for the residual CrossAttention score gate. "
+            "The actual initial scale is sigmoid(value)."
+        ),
+    )
+    parser.add_argument(
+        "--cross-attention-context-pool-sizes",
+        default="4",
+        help=(
+            "Comma-separated MaxPool sizes used to build CrossAttention DNA "
+            "context tokens, e.g. '2,4,8'."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -328,6 +354,9 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("TF holdout splits are only meaningful for dense protein models")
     if args.eval_every < 0:
         raise ValueError("--eval-every must be non-negative")
+    if not 0.0 <= args.tf_embedding_dropout < 1.0:
+        raise ValueError("--tf-embedding-dropout must be in [0, 1)")
+    parse_dilations(args.cross_attention_context_pool_sizes)
     if args.output_dir is None:
         args.output_dir = DEFAULT_MODEL_ROOT / f"promoter_{args.input_mode}_{args.model}"
     return args
@@ -699,6 +728,11 @@ def model_config_from_args(args: argparse.Namespace, input_channels: int) -> dic
         "kernel_size": args.kernel_size,
         "dropout": args.dropout,
         "dilations": list(parse_dilations(args.dilations)),
+        "tf_embedding_dropout": args.tf_embedding_dropout,
+        "cross_attention_gate_logit_init": args.cross_attention_gate_logit_init,
+        "cross_attention_context_pool_sizes": list(
+            parse_dilations(args.cross_attention_context_pool_sizes)
+        ),
         "embeddings_path": str(args.embeddings_path) if args.embeddings_path else None,
         "embedding_column": args.embedding_column,
         "embedding_key_column": args.embedding_key_column,
@@ -1057,6 +1091,11 @@ def main() -> None:
         kernel_size=args.kernel_size,
         dropout=args.dropout,
         dilations=dilations,
+        tf_embedding_dropout=args.tf_embedding_dropout,
+        cross_attention_gate_logit_init=args.cross_attention_gate_logit_init,
+        cross_attention_context_pool_sizes=parse_dilations(
+            args.cross_attention_context_pool_sizes
+        ),
     ).to(device)
     print("Trainable parameters:", count_parameters(model))
 

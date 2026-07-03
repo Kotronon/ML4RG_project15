@@ -205,6 +205,19 @@ def resolve_export_config(
         if args.dilations is not None
         else saved_config.get("dilations", saved_args.get("dilations", "1,2,4,8,16"))
     )
+    tf_embedding_dropout = float(
+        saved_config.get("tf_embedding_dropout", saved_args.get("tf_embedding_dropout", 0.0))
+    )
+    cross_attention_gate_logit_init = float(
+        saved_config.get(
+            "cross_attention_gate_logit_init",
+            saved_args.get("cross_attention_gate_logit_init", -3.0),
+        )
+    )
+    cross_attention_context_pool_sizes_raw = saved_config.get(
+        "cross_attention_context_pool_sizes",
+        saved_args.get("cross_attention_context_pool_sizes", "4"),
+    )
 
     sites_path = args.sites_path or arg_path(saved_args.get("sites_path"), DEFAULT_SITES_PATH)
     regions_path = args.regions_path or arg_path(saved_args.get("regions_path"), DEFAULT_REGIONS_PATH)
@@ -278,6 +291,11 @@ def resolve_export_config(
         "kernel_size": kernel_size,
         "dropout": float(dropout),
         "dilations": parse_dilations(dilations_raw),
+        "tf_embedding_dropout": tf_embedding_dropout,
+        "cross_attention_gate_logit_init": cross_attention_gate_logit_init,
+        "cross_attention_context_pool_sizes": parse_dilations(
+            cross_attention_context_pool_sizes_raw
+        ),
         "sites_path": sites_path,
         "regions_path": regions_path,
         "embeddings_path": embeddings_path,
@@ -595,6 +613,13 @@ def main() -> None:
         kernel_size=int(config["kernel_size"]),
         dropout=float(config["dropout"]),
         dilations=config["dilations"],
+        tf_embedding_dropout=float(config["tf_embedding_dropout"]),
+        cross_attention_gate_logit_init=float(
+            config["cross_attention_gate_logit_init"]
+        ),
+        cross_attention_context_pool_sizes=config[
+            "cross_attention_context_pool_sizes"
+        ],
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -704,6 +729,9 @@ def main() -> None:
             ),
             "tf_name_map": str(config["tf_name_map"]) if config["tf_name_map"] else None,
             "dilations": list(config["dilations"]),
+            "cross_attention_context_pool_sizes": list(
+                config["cross_attention_context_pool_sizes"]
+            ),
         },
     }
     metadata_path = args.predictions_out.with_suffix(".metadata.json")
