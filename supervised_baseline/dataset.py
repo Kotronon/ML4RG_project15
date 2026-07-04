@@ -777,6 +777,9 @@ class BindingBenchPromoterEmbeddingDataset(BindingBenchPromoterBaseDataset):
         tf_name_filter: Iterable[str] | None = None,
         max_regions: int | None = None,
         trim_terminal_atg: bool = True,
+        label_smoothing_mode: LabelSmoothingMode = "hard",
+        label_smoothing_radius_bp: int = 0,
+        label_smoothing_sigma_bp: float | None = None,
     ) -> None:
         self.embeddings_path = Path(embeddings_path)
         self.embedding_column = embedding_column
@@ -793,6 +796,9 @@ class BindingBenchPromoterEmbeddingDataset(BindingBenchPromoterBaseDataset):
             tf_name_filter=tf_name_filter,
             max_regions=max_regions,
             trim_terminal_atg=trim_terminal_atg,
+            label_smoothing_mode=label_smoothing_mode,
+            label_smoothing_radius_bp=label_smoothing_radius_bp,
+            label_smoothing_sigma_bp=label_smoothing_sigma_bp,
         )
         self._load_embeddings()
 
