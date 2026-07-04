@@ -42,6 +42,9 @@ MIN_SITES_PER_TF="${MIN_SITES_PER_TF:-15}"
 MAX_REGIONS="${MAX_REGIONS:-}"
 SEQUENCE_ORIENTATION="${SEQUENCE_ORIENTATION:-strand-aware}"
 INCLUDE_TERMINAL_ATG="${INCLUDE_TERMINAL_ATG:-false}"
+LABEL_SMOOTHING_MODE="${LABEL_SMOOTHING_MODE:-hard}"
+LABEL_SMOOTHING_RADIUS_BP="${LABEL_SMOOTHING_RADIUS_BP:-0}"
+LABEL_SMOOTHING_SIGMA_BP="${LABEL_SMOOTHING_SIGMA_BP:-}"
 HIDDEN_CHANNELS="${HIDDEN_CHANNELS:-128}"
 KERNEL_SIZE="${KERNEL_SIZE:-7}"
 DILATIONS="${DILATIONS:-1,2,4,8,16}"
@@ -149,6 +152,9 @@ echo "TF test names:        ${TF_TEST_NAMES:-<none>}"
 echo "TF sim threshold:     ${TF_SIMILARITY_THRESHOLD}"
 echo "Sequence orientation: ${SEQUENCE_ORIENTATION}"
 echo "Include terminal ATG: ${INCLUDE_TERMINAL_ATG}"
+echo "Label smoothing mode: ${LABEL_SMOOTHING_MODE}"
+echo "Label smooth radius:  ${LABEL_SMOOTHING_RADIUS_BP}"
+echo "Label smooth sigma:   ${LABEL_SMOOTHING_SIGMA_BP:-<auto>}"
 echo "No pos weight:        ${NO_POS_WEIGHT}"
 echo "Selection metric:     ${SELECTION_METRIC}"
 echo "Extra args:           ${EXTRA_ARGS}"
@@ -200,6 +206,9 @@ fi
 if [[ "${INCLUDE_TERMINAL_ATG}" == "true" ]]; then
     OPTIONAL_ARGS+=(--include-terminal-atg)
 fi
+if [[ -n "${LABEL_SMOOTHING_SIGMA_BP}" ]]; then
+    OPTIONAL_ARGS+=(--label-smoothing-sigma-bp "${LABEL_SMOOTHING_SIGMA_BP}")
+fi
 
 "${PYTHON_BIN}" "${TRAIN_SCRIPT}" \
     --sites-path "${SITES_PATH}" \
@@ -208,6 +217,8 @@ fi
     --output-dir "${OUTPUT_DIR}" \
     --min-sites-per-tf "${MIN_SITES_PER_TF}" \
     --sequence-orientation "${SEQUENCE_ORIENTATION}" \
+    --label-smoothing-mode "${LABEL_SMOOTHING_MODE}" \
+    --label-smoothing-radius-bp "${LABEL_SMOOTHING_RADIUS_BP}" \
     --model "${MODEL}" \
     --hidden-channels "${HIDDEN_CHANNELS}" \
     --kernel-size "${KERNEL_SIZE}" \

@@ -198,7 +198,7 @@ def write_plain_sequence(record, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     protein_id = str(record.id)
     sequence = clean_sequence(str(record.seq))
-    path.write_text(f"{protein_id}\n{sequence}\n")
+    path.write_text(f">{protein_id}\n{sequence}\n")
 
 
 def runner_candidates(model_dir: Path, code_dir: Path | None) -> list[Path]:

@@ -192,6 +192,30 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--label-smoothing-mode",
+        choices=("hard", "hard-dilate", "linear", "gaussian"),
+        default="hard",
+        help=(
+            "Training target used for dense labels. 'hard' keeps exact BindingBench "
+            "intervals; the other modes soften labels within --label-smoothing-radius-bp. "
+            "Evaluation metrics still use the original hard intervals."
+        ),
+    )
+    parser.add_argument(
+        "--label-smoothing-radius-bp",
+        type=int,
+        default=0,
+        help="Radius in bp around each true binding interval for softened training labels.",
+    )
+    parser.add_argument(
+        "--label-smoothing-sigma-bp",
+        type=float,
+        help=(
+            "Gaussian sigma in bp for --label-smoothing-mode gaussian. "
+            "Defaults to half the radius."
+        ),
+    )
+    parser.add_argument(
         "--model",
         choices=DENSE_MODEL_NAMES,
         default="dense_small_cnn",
@@ -356,6 +380,14 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--eval-every must be non-negative")
     if not 0.0 <= args.tf_embedding_dropout < 1.0:
         raise ValueError("--tf-embedding-dropout must be in [0, 1)")
+    if args.label_smoothing_radius_bp < 0:
+        raise ValueError("--label-smoothing-radius-bp must be non-negative")
+    if args.label_smoothing_sigma_bp is not None and args.label_smoothing_sigma_bp <= 0:
+        raise ValueError("--label-smoothing-sigma-bp must be positive")
+    if args.label_smoothing_mode != "hard" and args.label_smoothing_radius_bp <= 0:
+        raise ValueError(
+            "--label-smoothing-radius-bp must be positive when label smoothing is enabled"
+        )
     parse_dilations(args.cross_attention_context_pool_sizes)
     if args.output_dir is None:
         args.output_dir = DEFAULT_MODEL_ROOT / f"promoter_{args.input_mode}_{args.model}"
@@ -401,6 +433,9 @@ def build_dataset(
         "tf_name_filter": tf_name_filter,
         "max_regions": args.max_regions,
         "trim_terminal_atg": not args.include_terminal_atg,
+        "label_smoothing_mode": args.label_smoothing_mode,
+        "label_smoothing_radius_bp": args.label_smoothing_radius_bp,
+        "label_smoothing_sigma_bp": args.label_smoothing_sigma_bp,
     }
     if args.input_mode == "raw":
         return BindingBenchPromoterSequenceDataset(**common)
@@ -564,10 +599,14 @@ def collate_promoter_batch(
     y0 = items[0]["y"]
     if not isinstance(y0, torch.Tensor):
         raise TypeError("Dataset y must be a torch.Tensor")
+    hard_y0 = items[0].get("hard_y", y0)
+    if not isinstance(hard_y0, torch.Tensor):
+        raise TypeError("Dataset hard_y must be a torch.Tensor")
     max_len = max(int(item["y"].shape[-1]) for item in items)
     n_tfs = int(y0.shape[0])
 
     y_batch = torch.zeros((len(items), n_tfs, max_len), dtype=torch.float32)
+    hard_y_batch = torch.zeros((len(items), n_tfs, max_len), dtype=torch.float32)
     mask_batch = torch.zeros((len(items), max_len), dtype=torch.bool)
 
     if input_mode == "raw":
@@ -579,10 +618,12 @@ def collate_promoter_batch(
         for idx, item in enumerate(items):
             x = item["x"]
             y = item["y"]
+            hard_y = item.get("hard_y", y)
             mask = item["mask"]
             length = int(y.shape[-1])
             x_batch[idx, :, :length] = x
             y_batch[idx, :, :length] = y
+            hard_y_batch[idx, :, :length] = hard_y
             mask_batch[idx, :length] = mask
     elif input_mode == "embedding":
         x0 = items[0]["x"]
@@ -593,10 +634,12 @@ def collate_promoter_batch(
         for idx, item in enumerate(items):
             x = item["x"]
             y = item["y"]
+            hard_y = item.get("hard_y", y)
             mask = item["mask"]
             length = int(y.shape[-1])
             x_batch[idx, :length, :] = x
             y_batch[idx, :, :length] = y
+            hard_y_batch[idx, :, :length] = hard_y
             mask_batch[idx, :length] = mask
     else:
         raise ValueError(f"Unsupported input mode: {input_mode}")
@@ -604,6 +647,7 @@ def collate_promoter_batch(
     return {
         "x": x_batch,
         "y": y_batch,
+        "hard_y": hard_y_batch,
         "mask": mask_batch,
         "meta": [item["meta"] for item in items],
     }
@@ -620,10 +664,8 @@ def compute_dense_pos_weight(
     for record in records:
         mask = dataset._position_mask(record)
         valid_positions += float(mask.sum())
-        labels = np.zeros((len(dataset.tf_names), len(record.sequence)), dtype=bool)
-        for tf_idx, lo, hi in record.label_intervals:
-            labels[tf_idx, lo:hi] = True
-        labels[:, ~mask] = False
+        labels = dataset._dense_labels(record)
+        labels[:, ~mask] = 0.0
         positives += labels.sum(axis=1)
 
     negatives = valid_positions - positives
@@ -743,6 +785,9 @@ def model_config_from_args(args: argparse.Namespace, input_channels: int) -> dic
         "drop_missing_tf_embeddings": args.drop_missing_tf_embeddings,
         "tf_name_filter_from_embeddings": args.tf_name_filter_from_embeddings,
         "trim_terminal_atg": not args.include_terminal_atg,
+        "label_smoothing_mode": args.label_smoothing_mode,
+        "label_smoothing_radius_bp": args.label_smoothing_radius_bp,
+        "label_smoothing_sigma_bp": args.label_smoothing_sigma_bp,
     }
 
 
@@ -805,14 +850,20 @@ def train_one_epoch(
     for batch in loader:
         x = prepare_x(batch["x"].to(device, non_blocking=True), input_mode)
         y = batch["y"].to(device, non_blocking=True)
+        hard_y = batch["hard_y"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
         logits = forward_dense_model(model, x, tf_indices)
         y = select_tf_axis(y, tf_indices)
+        hard_y = select_tf_axis(hard_y, tf_indices)
         batch_pos_weight = select_tf_axis(pos_weight, tf_indices) if pos_weight is not None else None
         if logits.shape != y.shape:
             raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
+        if logits.shape != hard_y.shape:
+            raise ValueError(
+                f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
+            )
         loss = dense_bce_loss(logits, y, mask, batch_pos_weight)
         loss.backward()
         optimizer.step()
@@ -824,7 +875,7 @@ def train_one_epoch(
         with torch.no_grad():
             valid = mask.unsqueeze(1).expand_as(logits)
             pred = logits.sigmoid() >= 0.5
-            target = y >= 0.5
+            target = hard_y >= 0.5
             tp += (pred & target & valid).sum().item()
             fp += (pred & ~target & valid).sum().item()
             fn += (~pred & target & valid).sum().item()
@@ -882,10 +933,12 @@ def evaluate_dense(
         for batch in loader:
             x = prepare_x(batch["x"].to(device, non_blocking=True), input_mode)
             y = batch["y"].to(device, non_blocking=True)
+            hard_y = batch["hard_y"].to(device, non_blocking=True)
             mask = batch["mask"].to(device, non_blocking=True)
 
             logits = forward_dense_model(model, x, tf_indices)
             y = select_tf_axis(y, tf_indices)
+            hard_y = select_tf_axis(hard_y, tf_indices)
             batch_pos_weight = (
                 select_tf_axis(pos_weight, tf_indices)
                 if pos_weight is not None
@@ -893,6 +946,10 @@ def evaluate_dense(
             )
             if logits.shape != y.shape:
                 raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
+            if logits.shape != hard_y.shape:
+                raise ValueError(
+                    f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
+                )
             loss = dense_bce_loss(logits, y, mask, batch_pos_weight)
 
             batch_size = x.shape[0]
@@ -901,7 +958,7 @@ def evaluate_dense(
 
             valid = mask.unsqueeze(1).expand_as(logits)
             pred = logits.sigmoid() >= 0.5
-            target = y >= 0.5
+            target = hard_y >= 0.5
             tp += (pred & target & valid).sum().item()
             fp += (pred & ~target & valid).sum().item()
             fn += (~pred & target & valid).sum().item()

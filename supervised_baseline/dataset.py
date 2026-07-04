@@ -22,6 +22,7 @@ DEFAULT_REGIONS_PATH = Path(
 )
 
 SequenceOrientation = Literal["genomic", "strand-aware"]
+LabelSmoothingMode = Literal["hard", "hard-dilate", "linear", "gaussian"]
 
 
 @dataclass(frozen=True)
@@ -397,14 +398,26 @@ class BindingBenchPromoterBaseDataset(Dataset):
         tf_name_filter: Iterable[str] | None = None,
         max_regions: int | None = None,
         trim_terminal_atg: bool = True,
+        label_smoothing_mode: LabelSmoothingMode = "hard",
+        label_smoothing_radius_bp: int = 0,
+        label_smoothing_sigma_bp: float | None = None,
     ) -> None:
         if sequence_orientation not in {"genomic", "strand-aware"}:
             raise ValueError(f"Unsupported sequence_orientation: {sequence_orientation}")
+        if label_smoothing_mode not in {"hard", "hard-dilate", "linear", "gaussian"}:
+            raise ValueError(f"Unsupported label_smoothing_mode: {label_smoothing_mode}")
+        if label_smoothing_radius_bp < 0:
+            raise ValueError("label_smoothing_radius_bp must be non-negative")
+        if label_smoothing_sigma_bp is not None and label_smoothing_sigma_bp <= 0:
+            raise ValueError("label_smoothing_sigma_bp must be positive")
 
         self.sites_path = Path(sites_path)
         self.regions_path = Path(regions_path)
         self.sequence_orientation = sequence_orientation
         self.trim_terminal_atg = trim_terminal_atg
+        self.label_smoothing_mode = label_smoothing_mode
+        self.label_smoothing_radius_bp = label_smoothing_radius_bp
+        self.label_smoothing_sigma_bp = label_smoothing_sigma_bp
 
         self.sites = self._read_sites(min_sites_per_tf, tf_name_filter)
         self.regions = self._read_regions()
@@ -424,11 +437,13 @@ class BindingBenchPromoterBaseDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, object]:
         record = self.records[idx]
         x = self._get_x(idx, record)
-        labels = self._dense_labels(record)
+        hard_labels = self._hard_dense_labels(record)
+        labels = self._smooth_dense_labels(record, hard_labels.copy())
         mask = self._position_mask(record)
         return {
             "x": x,
             "y": torch.tensor(labels, dtype=torch.float32),
+            "hard_y": torch.tensor(hard_labels, dtype=torch.float32),
             "mask": torch.tensor(mask, dtype=torch.bool),
             "meta": {
                 "record_idx": idx,
@@ -462,6 +477,9 @@ class BindingBenchPromoterBaseDataset(Dataset):
             "n_tfs": len(self.tf_names),
             "sequence_orientation": self.sequence_orientation,
             "trim_terminal_atg": self.trim_terminal_atg,
+            "label_smoothing_mode": self.label_smoothing_mode,
+            "label_smoothing_radius_bp": self.label_smoothing_radius_bp,
+            "label_smoothing_sigma_bp": self.label_smoothing_sigma_bp,
             "total_positions": total_positions,
             "coordinate_positions": coordinate_positions,
             "positive_tf_positions": positive_tf_positions,
@@ -632,10 +650,63 @@ class BindingBenchPromoterBaseDataset(Dataset):
         hi = max(0, min(length, hi))
         return lo, hi
 
-    def _dense_labels(self, record: PromoterRecord) -> np.ndarray:
+    def _hard_dense_labels(self, record: PromoterRecord) -> np.ndarray:
         labels = np.zeros((len(self.tf_names), len(record.sequence)), dtype=np.float32)
         for tf_idx, lo, hi in record.label_intervals:
             labels[tf_idx, lo:hi] = 1.0
+        return labels
+
+    def _dense_labels(self, record: PromoterRecord) -> np.ndarray:
+        hard_labels = self._hard_dense_labels(record)
+        return self._smooth_dense_labels(record, hard_labels)
+
+    def _smooth_dense_labels(
+        self,
+        record: PromoterRecord,
+        labels: np.ndarray,
+    ) -> np.ndarray:
+        radius = self.label_smoothing_radius_bp
+        if self.label_smoothing_mode == "hard" or radius <= 0:
+            return labels
+
+        length = labels.shape[1]
+        for tf_idx, lo, hi in record.label_intervals:
+            if hi <= lo:
+                continue
+            smooth_lo = max(0, lo - radius)
+            smooth_hi = min(length, hi + radius)
+            if smooth_hi <= smooth_lo:
+                continue
+
+            if self.label_smoothing_mode == "hard-dilate":
+                labels[tf_idx, smooth_lo:smooth_hi] = 1.0
+                continue
+
+            positions = np.arange(smooth_lo, smooth_hi)
+            distances = np.zeros_like(positions, dtype=np.float32)
+            before = positions < lo
+            after = positions >= hi
+            distances[before] = lo - positions[before]
+            distances[after] = positions[after] - hi + 1
+
+            if self.label_smoothing_mode == "linear":
+                values = np.maximum(0.0, 1.0 - distances / float(radius + 1))
+            elif self.label_smoothing_mode == "gaussian":
+                sigma = (
+                    self.label_smoothing_sigma_bp
+                    if self.label_smoothing_sigma_bp is not None
+                    else max(radius / 2.0, 1.0)
+                )
+                values = np.exp(-0.5 * (distances / float(sigma)) ** 2)
+            else:
+                raise ValueError(
+                    f"Unsupported label_smoothing_mode: {self.label_smoothing_mode}"
+                )
+
+            labels[tf_idx, smooth_lo:smooth_hi] = np.maximum(
+                labels[tf_idx, smooth_lo:smooth_hi],
+                values.astype(np.float32),
+            )
         return labels
 
     @staticmethod
