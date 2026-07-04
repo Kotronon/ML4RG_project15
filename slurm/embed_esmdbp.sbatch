@@ -30,6 +30,7 @@ KEEP_NAMES="${KEEP_NAMES:-${REPO_DIR}/supervised_baseline/binding_bench_tf_names
 WORK_DIR="${WORK_DIR:-${PROJECT}/working/protein_embeddings/esmdbp_features_scer_tf}"
 DEVICE="${DEVICE:-cuda}"
 POOLING="${POOLING:-mean}"
+RUNNER_INPUT_MODE="${RUNNER_INPUT_MODE:-auto}"
 SKIP_RUN="${SKIP_RUN:-false}"
 OVERWRITE_WORK_DIR="${OVERWRITE_WORK_DIR:-false}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
@@ -150,6 +151,7 @@ echo "Keep names:     ${KEEP_NAMES:-<all proteins>}"
 echo "Work dir:       ${WORK_DIR}"
 echo "Device:         ${DEVICE}"
 echo "Pooling:        ${POOLING}"
+echo "Runner input:   ${RUNNER_INPUT_MODE}"
 echo "Skip run:       ${SKIP_RUN}"
 echo "Overwrite work: ${OVERWRITE_WORK_DIR}"
 echo "Extra args:     ${EXTRA_ARGS}"
@@ -161,6 +163,7 @@ echo "Extra args:     ${EXTRA_ARGS}"
     --work-dir "${WORK_DIR}" \
     --device "${DEVICE}" \
     --pooling "${POOLING}" \
+    --runner-input-mode "${RUNNER_INPUT_MODE}" \
     --python-bin "${PYTHON_BIN}" \
     "${OPTIONAL_ARGS[@]}" \
     ${EXTRA_ARGS}
