@@ -19,7 +19,7 @@ try:
         DEFAULT_REGIONS_PATH,
         DEFAULT_SITES_PATH,
     )
-    from .model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations
+    from .model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations, parse_int_tuple
     from .promoter_splits import (
         load_promoter_split,
         make_all_train_split,
@@ -48,7 +48,7 @@ except ImportError:
         DEFAULT_REGIONS_PATH,
         DEFAULT_SITES_PATH,
     )
-    from model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations
+    from model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations, parse_int_tuple
     from promoter_splits import (
         load_promoter_split,
         make_all_train_split,
@@ -79,6 +79,7 @@ DEFAULT_MODEL_ROOT = Path(
 PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_res_dilated_cnn",
     "dense_protein_local_attention",
+    "dense_protein_motif_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )
@@ -279,6 +280,14 @@ def parse_args() -> argparse.Namespace:
         help="Feed-forward width multiplier inside local DNA self-attention blocks.",
     )
     parser.add_argument(
+        "--motif-kernel-sizes",
+        default="7,11,15",
+        help=(
+            "Comma-separated odd convolution widths for dense_protein_motif_cnn's "
+            "raw motif stem."
+        ),
+    )
+    parser.add_argument(
         "--protein-noise-std",
         type=float,
         default=0.0,
@@ -474,6 +483,7 @@ def parse_args() -> argparse.Namespace:
             "--label-smoothing-radius-bp must be positive when label smoothing is enabled"
         )
     parse_dilations(args.cross_attention_context_pool_sizes)
+    parse_int_tuple(args.motif_kernel_sizes)
     if args.output_dir is None:
         args.output_dir = DEFAULT_MODEL_ROOT / f"promoter_{args.input_mode}_{args.model}"
     return args
@@ -864,6 +874,7 @@ def model_config_from_args(args: argparse.Namespace, input_channels: int) -> dic
         "dna_attention_layers": args.dna_attention_layers,
         "dna_attention_heads": args.dna_attention_heads,
         "dna_attention_ffn_multiplier": args.dna_attention_ffn_multiplier,
+        "motif_kernel_sizes": list(parse_int_tuple(args.motif_kernel_sizes)),
         "protein_noise_std": args.protein_noise_std,
         "protein_l2_normalize": args.protein_l2_normalize,
         "scorer": args.scorer,
@@ -1253,6 +1264,7 @@ def main() -> None:
         dna_attention_layers=args.dna_attention_layers,
         dna_attention_heads=args.dna_attention_heads,
         dna_attention_ffn_multiplier=args.dna_attention_ffn_multiplier,
+        motif_kernel_sizes=parse_int_tuple(args.motif_kernel_sizes),
         protein_noise_std=args.protein_noise_std,
         protein_l2_normalize=args.protein_l2_normalize,
         scorer=args.scorer,

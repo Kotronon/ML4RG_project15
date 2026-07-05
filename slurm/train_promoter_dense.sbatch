@@ -56,6 +56,7 @@ DNA_ATTENTION_WINDOW_BP="${DNA_ATTENTION_WINDOW_BP:-50}"
 DNA_ATTENTION_LAYERS="${DNA_ATTENTION_LAYERS:-2}"
 DNA_ATTENTION_HEADS="${DNA_ATTENTION_HEADS:-8}"
 DNA_ATTENTION_FFN_MULTIPLIER="${DNA_ATTENTION_FFN_MULTIPLIER:-4.0}"
+MOTIF_KERNEL_SIZES="${MOTIF_KERNEL_SIZES:-7,11,15}"
 PROTEIN_NOISE_STD="${PROTEIN_NOISE_STD:-0.0}"
 PROTEIN_L2_NORMALIZE="${PROTEIN_L2_NORMALIZE:-false}"
 SCORER="${SCORER:-multihead_bilinear}"
@@ -143,6 +144,7 @@ echo "DNA attn window bp:   ${DNA_ATTENTION_WINDOW_BP}"
 echo "DNA attn layers:      ${DNA_ATTENTION_LAYERS}"
 echo "DNA attn heads:       ${DNA_ATTENTION_HEADS}"
 echo "DNA attn FFN mult:    ${DNA_ATTENTION_FFN_MULTIPLIER}"
+echo "Motif kernel sizes:   ${MOTIF_KERNEL_SIZES}"
 echo "Protein noise std:    ${PROTEIN_NOISE_STD}"
 echo "Protein L2 normalize: ${PROTEIN_L2_NORMALIZE}"
 echo "Scorer:               ${SCORER}"
@@ -256,6 +258,7 @@ fi
     --dna-attention-layers "${DNA_ATTENTION_LAYERS}" \
     --dna-attention-heads "${DNA_ATTENTION_HEADS}" \
     --dna-attention-ffn-multiplier "${DNA_ATTENTION_FFN_MULTIPLIER}" \
+    --motif-kernel-sizes "${MOTIF_KERNEL_SIZES}" \
     --protein-noise-std "${PROTEIN_NOISE_STD}" \
     --scorer "${SCORER}" \
     --scorer-heads "${SCORER_HEADS}" \
