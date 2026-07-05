@@ -78,6 +78,7 @@ DEFAULT_MODEL_ROOT = Path(
 )
 PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_res_dilated_cnn",
+    "dense_protein_local_attention",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )
@@ -250,6 +251,74 @@ def parse_args() -> argparse.Namespace:
             "context tokens, e.g. '2,4,8'."
         ),
     )
+    parser.add_argument(
+        "--dna-attention-window-bp",
+        type=int,
+        default=50,
+        help=(
+            "Local self-attention radius in bp for dense_protein_local_attention. "
+            "Use 0 for full promoter self-attention."
+        ),
+    )
+    parser.add_argument(
+        "--dna-attention-layers",
+        type=int,
+        default=2,
+        help="Number of local DNA self-attention blocks.",
+    )
+    parser.add_argument(
+        "--dna-attention-heads",
+        type=int,
+        default=8,
+        help="Number of heads in each local DNA self-attention block.",
+    )
+    parser.add_argument(
+        "--dna-attention-ffn-multiplier",
+        type=float,
+        default=4.0,
+        help="Feed-forward width multiplier inside local DNA self-attention blocks.",
+    )
+    parser.add_argument(
+        "--protein-noise-std",
+        type=float,
+        default=0.0,
+        help="Gaussian noise std added to TF embeddings during training.",
+    )
+    parser.add_argument(
+        "--protein-l2-normalize",
+        action="store_true",
+        help="L2-normalize adapted TF vectors before scoring.",
+    )
+    parser.add_argument(
+        "--scorer",
+        choices=("multihead_bilinear", "mlp"),
+        default="multihead_bilinear",
+        help="TF-DNA interaction scorer for dense_protein_local_attention.",
+    )
+    parser.add_argument(
+        "--scorer-heads",
+        type=int,
+        default=8,
+        help="Interaction heads for the multi-head bilinear scorer.",
+    )
+    parser.add_argument(
+        "--scorer-pair-dim",
+        type=int,
+        default=32,
+        help="Per-head dimension for bilinear scorer or pair embedding dim for MLP scorer.",
+    )
+    parser.add_argument(
+        "--scorer-hidden-dim",
+        type=int,
+        default=128,
+        help="Hidden dimension for the MLP scorer.",
+    )
+    parser.add_argument(
+        "--scorer-bias-mode",
+        choices=("none", "tf", "dna", "both"),
+        default="tf",
+        help="Optional additive bias terms in the protein-conditioned scorer.",
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -380,6 +449,22 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--eval-every must be non-negative")
     if not 0.0 <= args.tf_embedding_dropout < 1.0:
         raise ValueError("--tf-embedding-dropout must be in [0, 1)")
+    if args.dna_attention_window_bp < 0:
+        raise ValueError("--dna-attention-window-bp must be non-negative")
+    if args.dna_attention_layers <= 0:
+        raise ValueError("--dna-attention-layers must be positive")
+    if args.dna_attention_heads <= 0:
+        raise ValueError("--dna-attention-heads must be positive")
+    if args.dna_attention_ffn_multiplier <= 0:
+        raise ValueError("--dna-attention-ffn-multiplier must be positive")
+    if args.protein_noise_std < 0:
+        raise ValueError("--protein-noise-std must be non-negative")
+    if args.scorer_heads <= 0:
+        raise ValueError("--scorer-heads must be positive")
+    if args.scorer_pair_dim <= 0:
+        raise ValueError("--scorer-pair-dim must be positive")
+    if args.scorer_hidden_dim <= 0:
+        raise ValueError("--scorer-hidden-dim must be positive")
     if args.label_smoothing_radius_bp < 0:
         raise ValueError("--label-smoothing-radius-bp must be non-negative")
     if args.label_smoothing_sigma_bp is not None and args.label_smoothing_sigma_bp <= 0:
@@ -775,6 +860,17 @@ def model_config_from_args(args: argparse.Namespace, input_channels: int) -> dic
         "cross_attention_context_pool_sizes": list(
             parse_dilations(args.cross_attention_context_pool_sizes)
         ),
+        "dna_attention_window_bp": args.dna_attention_window_bp,
+        "dna_attention_layers": args.dna_attention_layers,
+        "dna_attention_heads": args.dna_attention_heads,
+        "dna_attention_ffn_multiplier": args.dna_attention_ffn_multiplier,
+        "protein_noise_std": args.protein_noise_std,
+        "protein_l2_normalize": args.protein_l2_normalize,
+        "scorer": args.scorer,
+        "scorer_heads": args.scorer_heads,
+        "scorer_pair_dim": args.scorer_pair_dim,
+        "scorer_hidden_dim": args.scorer_hidden_dim,
+        "scorer_bias_mode": args.scorer_bias_mode,
         "embeddings_path": str(args.embeddings_path) if args.embeddings_path else None,
         "embedding_column": args.embedding_column,
         "embedding_key_column": args.embedding_key_column,
@@ -1153,6 +1249,17 @@ def main() -> None:
         cross_attention_context_pool_sizes=parse_dilations(
             args.cross_attention_context_pool_sizes
         ),
+        dna_attention_window_bp=args.dna_attention_window_bp,
+        dna_attention_layers=args.dna_attention_layers,
+        dna_attention_heads=args.dna_attention_heads,
+        dna_attention_ffn_multiplier=args.dna_attention_ffn_multiplier,
+        protein_noise_std=args.protein_noise_std,
+        protein_l2_normalize=args.protein_l2_normalize,
+        scorer=args.scorer,
+        scorer_heads=args.scorer_heads,
+        scorer_pair_dim=args.scorer_pair_dim,
+        scorer_hidden_dim=args.scorer_hidden_dim,
+        scorer_bias_mode=args.scorer_bias_mode,
     ).to(device)
     print("Trainable parameters:", count_parameters(model))
 

@@ -52,6 +52,17 @@ DROPOUT="${DROPOUT:-0.1}"
 TF_EMBEDDING_DROPOUT="${TF_EMBEDDING_DROPOUT:-0.0}"
 CROSS_ATTENTION_GATE_LOGIT_INIT="${CROSS_ATTENTION_GATE_LOGIT_INIT:--3.0}"
 CROSS_ATTENTION_CONTEXT_POOL_SIZES="${CROSS_ATTENTION_CONTEXT_POOL_SIZES:-4}"
+DNA_ATTENTION_WINDOW_BP="${DNA_ATTENTION_WINDOW_BP:-50}"
+DNA_ATTENTION_LAYERS="${DNA_ATTENTION_LAYERS:-2}"
+DNA_ATTENTION_HEADS="${DNA_ATTENTION_HEADS:-8}"
+DNA_ATTENTION_FFN_MULTIPLIER="${DNA_ATTENTION_FFN_MULTIPLIER:-4.0}"
+PROTEIN_NOISE_STD="${PROTEIN_NOISE_STD:-0.0}"
+PROTEIN_L2_NORMALIZE="${PROTEIN_L2_NORMALIZE:-false}"
+SCORER="${SCORER:-multihead_bilinear}"
+SCORER_HEADS="${SCORER_HEADS:-8}"
+SCORER_PAIR_DIM="${SCORER_PAIR_DIM:-32}"
+SCORER_HIDDEN_DIM="${SCORER_HIDDEN_DIM:-128}"
+SCORER_BIAS_MODE="${SCORER_BIAS_MODE:-tf}"
 EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 LR="${LR:-0.001}"
@@ -128,6 +139,17 @@ echo "Dropout:              ${DROPOUT}"
 echo "TF emb dropout:       ${TF_EMBEDDING_DROPOUT}"
 echo "CrossAttn gate init:  ${CROSS_ATTENTION_GATE_LOGIT_INIT}"
 echo "CrossAttn pools:      ${CROSS_ATTENTION_CONTEXT_POOL_SIZES}"
+echo "DNA attn window bp:   ${DNA_ATTENTION_WINDOW_BP}"
+echo "DNA attn layers:      ${DNA_ATTENTION_LAYERS}"
+echo "DNA attn heads:       ${DNA_ATTENTION_HEADS}"
+echo "DNA attn FFN mult:    ${DNA_ATTENTION_FFN_MULTIPLIER}"
+echo "Protein noise std:    ${PROTEIN_NOISE_STD}"
+echo "Protein L2 normalize: ${PROTEIN_L2_NORMALIZE}"
+echo "Scorer:               ${SCORER}"
+echo "Scorer heads:         ${SCORER_HEADS}"
+echo "Scorer pair dim:      ${SCORER_PAIR_DIM}"
+echo "Scorer hidden dim:    ${SCORER_HIDDEN_DIM}"
+echo "Scorer bias mode:     ${SCORER_BIAS_MODE}"
 echo "Epochs:               ${EPOCHS}"
 echo "Batch size:           ${BATCH_SIZE}"
 echo "LR:                   ${LR}"
@@ -209,6 +231,9 @@ fi
 if [[ -n "${LABEL_SMOOTHING_SIGMA_BP}" ]]; then
     OPTIONAL_ARGS+=(--label-smoothing-sigma-bp "${LABEL_SMOOTHING_SIGMA_BP}")
 fi
+if [[ "${PROTEIN_L2_NORMALIZE}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--protein-l2-normalize)
+fi
 
 "${PYTHON_BIN}" "${TRAIN_SCRIPT}" \
     --sites-path "${SITES_PATH}" \
@@ -227,6 +252,16 @@ fi
     --tf-embedding-dropout "${TF_EMBEDDING_DROPOUT}" \
     --cross-attention-gate-logit-init "${CROSS_ATTENTION_GATE_LOGIT_INIT}" \
     --cross-attention-context-pool-sizes "${CROSS_ATTENTION_CONTEXT_POOL_SIZES}" \
+    --dna-attention-window-bp "${DNA_ATTENTION_WINDOW_BP}" \
+    --dna-attention-layers "${DNA_ATTENTION_LAYERS}" \
+    --dna-attention-heads "${DNA_ATTENTION_HEADS}" \
+    --dna-attention-ffn-multiplier "${DNA_ATTENTION_FFN_MULTIPLIER}" \
+    --protein-noise-std "${PROTEIN_NOISE_STD}" \
+    --scorer "${SCORER}" \
+    --scorer-heads "${SCORER_HEADS}" \
+    --scorer-pair-dim "${SCORER_PAIR_DIM}" \
+    --scorer-hidden-dim "${SCORER_HIDDEN_DIM}" \
+    --scorer-bias-mode "${SCORER_BIAS_MODE}" \
     --epochs "${EPOCHS}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \
