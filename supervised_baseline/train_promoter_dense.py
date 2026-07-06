@@ -114,6 +114,10 @@ class DenseSplitStats:
     per_tf: list[dict[str, object]] | None = None
 
 
+LABEL_MODES = ("tf", "merged_train_tfs")
+LOSS_NAMES = ("bce", "focal")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train promoter-level dense TF binding baselines."
@@ -224,6 +228,35 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated MaxPool sizes used to build CrossAttention DNA "
             "context tokens, e.g. '2,4,8'."
+        ),
+    )
+    parser.add_argument(
+        "--label-mode",
+        choices=LABEL_MODES,
+        default="tf",
+        help=(
+            "Use per-TF dense labels, or collapse labels into one DNA-only "
+            "channel using training TFs only."
+        ),
+    )
+    parser.add_argument(
+        "--loss",
+        choices=LOSS_NAMES,
+        default="bce",
+        help="Dense training loss.",
+    )
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=2.0,
+        help="Focusing exponent for --loss focal.",
+    )
+    parser.add_argument(
+        "--focal-alpha",
+        type=float,
+        help=(
+            "Optional focal alpha for positives. Leave unset to use only "
+            "--pos-weight with focal modulation."
         ),
     )
     parser.add_argument("--epochs", type=int, default=50)
@@ -350,10 +383,20 @@ def parse_args() -> argparse.Namespace:
         raise ValueError(
             "--tf-embeddings-path is required when filtering TFs to available embeddings"
         )
-    if args.tf_split_mode != "none" and args.model not in PROTEIN_DENSE_MODEL_NAMES:
+    if (
+        args.tf_split_mode != "none"
+        and args.model not in PROTEIN_DENSE_MODEL_NAMES
+        and args.label_mode == "tf"
+    ):
         raise ValueError("TF holdout splits are only meaningful for dense protein models")
     if args.eval_every < 0:
         raise ValueError("--eval-every must be non-negative")
+    if args.focal_gamma < 0:
+        raise ValueError("--focal-gamma must be non-negative")
+    if args.focal_alpha is not None and not 0.0 <= args.focal_alpha <= 1.0:
+        raise ValueError("--focal-alpha must be between 0 and 1")
+    if args.label_mode != "tf" and args.model in PROTEIN_DENSE_MODEL_NAMES:
+        raise ValueError("--label-mode merged_train_tfs is intended for DNA-only models")
     if not 0.0 <= args.tf_embedding_dropout < 1.0:
         raise ValueError("--tf-embedding-dropout must be in [0, 1)")
     parse_dilations(args.cross_attention_context_pool_sizes)
@@ -554,6 +597,21 @@ def select_tf_axis(
     return tensor.index_select(1, tf_indices)
 
 
+def make_dense_targets(
+    y: torch.Tensor,
+    *,
+    label_mode: str,
+    model_tf_indices: torch.Tensor | None,
+    merge_tf_indices: torch.Tensor | None,
+) -> torch.Tensor:
+    if label_mode == "tf":
+        return select_tf_axis(y, model_tf_indices)
+    if label_mode == "merged_train_tfs":
+        selected = select_tf_axis(y, merge_tf_indices)
+        return selected.amax(dim=1, keepdim=True)
+    raise ValueError(f"Unknown label mode: {label_mode}")
+
+
 def collate_promoter_batch(
     items: list[dict[str, object]],
     input_mode: str,
@@ -632,6 +690,33 @@ def compute_dense_pos_weight(
     return torch.tensor(weights, dtype=torch.float32, device=device).view(1, -1, 1)
 
 
+def compute_merged_pos_weight(
+    dataset,
+    device: torch.device,
+    *,
+    indices: list[int] | None = None,
+    tf_indices: list[int] | None = None,
+) -> torch.Tensor:
+    selected_tfs = None if tf_indices is None else {int(idx) for idx in tf_indices}
+    positives = 0.0
+    valid_positions = 0.0
+    records = dataset.records if indices is None else [dataset.records[idx] for idx in indices]
+    for record in records:
+        mask = dataset._position_mask(record)
+        valid_positions += float(mask.sum())
+        labels = np.zeros(len(record.sequence), dtype=bool)
+        for tf_idx, lo, hi in record.label_intervals:
+            if selected_tfs is None or int(tf_idx) in selected_tfs:
+                labels[lo:hi] = True
+        labels[~mask] = False
+        positives += float(labels.sum())
+
+    negatives = valid_positions - positives
+    weight = negatives / max(positives, 1.0)
+    weight = float(np.clip(weight, 1.0, 100.0))
+    return torch.tensor([[[weight]]], dtype=torch.float32, device=device)
+
+
 def dense_bce_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -646,6 +731,55 @@ def dense_bce_loss(
     )
     valid = mask.unsqueeze(1).expand_as(loss)
     return loss[valid].mean()
+
+
+def dense_focal_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    mask: torch.Tensor,
+    pos_weight: torch.Tensor | None,
+    *,
+    gamma: float,
+    alpha: float | None,
+) -> torch.Tensor:
+    bce = F.binary_cross_entropy_with_logits(
+        logits,
+        targets,
+        pos_weight=pos_weight,
+        reduction="none",
+    )
+    probs = logits.sigmoid()
+    p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
+    loss = bce * (1.0 - p_t).clamp_min(1e-6).pow(gamma)
+    if alpha is not None:
+        alpha_t = alpha * targets + (1.0 - alpha) * (1.0 - targets)
+        loss = loss * alpha_t
+    valid = mask.unsqueeze(1).expand_as(loss)
+    return loss[valid].mean()
+
+
+def dense_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    mask: torch.Tensor,
+    pos_weight: torch.Tensor | None,
+    *,
+    loss_name: str,
+    focal_gamma: float,
+    focal_alpha: float | None,
+) -> torch.Tensor:
+    if loss_name == "bce":
+        return dense_bce_loss(logits, targets, mask, pos_weight)
+    if loss_name == "focal":
+        return dense_focal_loss(
+            logits,
+            targets,
+            mask,
+            pos_weight,
+            gamma=focal_gamma,
+            alpha=focal_alpha,
+        )
+    raise ValueError(f"Unknown loss: {loss_name}")
 
 
 def binary_average_precision(scores: np.ndarray, targets: np.ndarray) -> float | None:
@@ -719,11 +853,20 @@ def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"])
 
 
-def model_config_from_args(args: argparse.Namespace, input_channels: int) -> dict[str, object]:
+def model_config_from_args(
+    args: argparse.Namespace,
+    input_channels: int,
+    output_channels: int,
+) -> dict[str, object]:
     return {
         "model_name": args.model,
         "input_mode": args.input_mode,
         "input_channels": input_channels,
+        "output_channels": output_channels,
+        "label_mode": args.label_mode,
+        "loss": args.loss,
+        "focal_gamma": args.focal_gamma,
+        "focal_alpha": args.focal_alpha,
         "hidden_channels": args.hidden_channels,
         "kernel_size": args.kernel_size,
         "dropout": args.dropout,
@@ -759,6 +902,7 @@ def save_checkpoint(
     args: argparse.Namespace,
     dataset,
     input_channels: int,
+    output_channels: int,
     stats: DenseEpochStats,
     promoter_split: dict[str, object] | None = None,
     tf_split: dict[str, object] | None = None,
@@ -769,7 +913,7 @@ def save_checkpoint(
         {
             "epoch": epoch,
             "model_name": args.model,
-            "model_config": model_config_from_args(args, input_channels),
+            "model_config": model_config_from_args(args, input_channels, output_channels),
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "args": serializable_args(args),
@@ -792,7 +936,12 @@ def train_one_epoch(
     device: torch.device,
     input_mode: str,
     pos_weight: torch.Tensor | None,
-    tf_indices: torch.Tensor | None,
+    model_tf_indices: torch.Tensor | None,
+    merge_tf_indices: torch.Tensor | None,
+    label_mode: str,
+    loss_name: str,
+    focal_gamma: float,
+    focal_alpha: float | None,
     epoch: int,
 ) -> DenseEpochStats:
     model.train()
@@ -808,12 +957,29 @@ def train_one_epoch(
         mask = batch["mask"].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        logits = forward_dense_model(model, x, tf_indices)
-        y = select_tf_axis(y, tf_indices)
-        batch_pos_weight = select_tf_axis(pos_weight, tf_indices) if pos_weight is not None else None
+        logits = forward_dense_model(model, x, model_tf_indices)
+        y = make_dense_targets(
+            y,
+            label_mode=label_mode,
+            model_tf_indices=model_tf_indices,
+            merge_tf_indices=merge_tf_indices,
+        )
+        batch_pos_weight = (
+            select_tf_axis(pos_weight, model_tf_indices)
+            if pos_weight is not None and label_mode == "tf"
+            else pos_weight
+        )
         if logits.shape != y.shape:
             raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
-        loss = dense_bce_loss(logits, y, mask, batch_pos_weight)
+        loss = dense_loss(
+            logits,
+            y,
+            mask,
+            batch_pos_weight,
+            loss_name=loss_name,
+            focal_gamma=focal_gamma,
+            focal_alpha=focal_alpha,
+        )
         loss.backward()
         optimizer.step()
 
@@ -852,7 +1018,12 @@ def evaluate_dense(
     device: torch.device,
     input_mode: str,
     pos_weight: torch.Tensor | None,
-    tf_indices: torch.Tensor | None,
+    model_tf_indices: torch.Tensor | None,
+    merge_tf_indices: torch.Tensor | None,
+    label_mode: str,
+    loss_name: str,
+    focal_gamma: float,
+    focal_alpha: float | None,
     tf_names: list[str] | None = None,
 ) -> DenseSplitStats:
     model.eval()
@@ -868,12 +1039,14 @@ def evaluate_dense(
     selected_tf_names: list[str] | None = None
 
     if tf_names is not None:
-        if tf_indices is None:
+        if label_mode == "merged_train_tfs":
+            selected_tf_names = ["merged_train_tfs"]
+        elif model_tf_indices is None:
             selected_tf_names = [str(name) for name in tf_names]
         else:
             selected_tf_names = [
                 str(tf_names[int(idx)])
-                for idx in tf_indices.detach().cpu().numpy().tolist()
+                for idx in model_tf_indices.detach().cpu().numpy().tolist()
             ]
         per_tf_score_chunks = [[] for _ in selected_tf_names]
         per_tf_target_chunks = [[] for _ in selected_tf_names]
@@ -884,16 +1057,31 @@ def evaluate_dense(
             y = batch["y"].to(device, non_blocking=True)
             mask = batch["mask"].to(device, non_blocking=True)
 
-            logits = forward_dense_model(model, x, tf_indices)
-            y = select_tf_axis(y, tf_indices)
+            logits = forward_dense_model(model, x, model_tf_indices)
+            y = make_dense_targets(
+                y,
+                label_mode=label_mode,
+                model_tf_indices=model_tf_indices,
+                merge_tf_indices=merge_tf_indices,
+            )
             batch_pos_weight = (
-                select_tf_axis(pos_weight, tf_indices)
-                if pos_weight is not None
+                select_tf_axis(pos_weight, model_tf_indices)
+                if pos_weight is not None and label_mode == "tf"
                 else None
             )
+            if label_mode != "tf":
+                batch_pos_weight = pos_weight
             if logits.shape != y.shape:
                 raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
-            loss = dense_bce_loss(logits, y, mask, batch_pos_weight)
+            loss = dense_loss(
+                logits,
+                y,
+                mask,
+                batch_pos_weight,
+                loss_name=loss_name,
+                focal_gamma=focal_gamma,
+                focal_alpha=focal_alpha,
+            )
 
             batch_size = x.shape[0]
             total_loss += float(loss.detach().cpu()) * batch_size
@@ -1039,10 +1227,14 @@ def main() -> None:
     val_tf_tensor = tensor_indices(val_tf_indices, device) if val_tf_indices else None
     test_tf_tensor = tensor_indices(test_tf_indices, device) if test_tf_indices else None
     input_channels = infer_input_channels(dataset, args.input_mode)
+    output_channels = 1 if args.label_mode == "merged_train_tfs" else len(dataset.tf_names)
     print("Dataset:", dataset.summary())
     print("Promoter split:", promoter_split["counts"])
     print("TF split:", tf_split["counts"])
     print("Input channels:", input_channels)
+    print("Output channels:", output_channels)
+    print("Label mode:", args.label_mode)
+    print("Loss:", args.loss)
     print("Device:", device)
     print("Model:", args.model)
 
@@ -1084,7 +1276,7 @@ def main() -> None:
 
     model = build_dense_model(
         args.model,
-        n_tfs=len(dataset.tf_names),
+        n_tfs=output_channels,
         input_channels=input_channels,
         tf_embeddings=tf_embeddings,
         hidden_channels=args.hidden_channels,
@@ -1105,11 +1297,17 @@ def main() -> None:
         weight_decay=args.weight_decay,
     )
     scheduler = build_lr_scheduler(args, optimizer)
-    pos_weight = (
-        None
-        if args.no_pos_weight
-        else compute_dense_pos_weight(dataset, device, indices=train_indices)
-    )
+    if args.no_pos_weight:
+        pos_weight = None
+    elif args.label_mode == "merged_train_tfs":
+        pos_weight = compute_merged_pos_weight(
+            dataset,
+            device,
+            indices=train_indices,
+            tf_indices=train_tf_indices if use_tf_holdout else None,
+        )
+    else:
+        pos_weight = compute_dense_pos_weight(dataset, device, indices=train_indices)
     if pos_weight is not None:
         flat_weight = pos_weight.flatten()
         print(
@@ -1125,7 +1323,10 @@ def main() -> None:
     save_json(args.output_dir / "tf_names.json", dataset.tf_names)
     save_json(args.output_dir / "dataset_summary.json", dataset.summary())
     save_json(args.output_dir / "args.json", serializable_args(args))
-    save_json(args.output_dir / "model_config.json", model_config_from_args(args, input_channels))
+    save_json(
+        args.output_dir / "model_config.json",
+        model_config_from_args(args, input_channels, output_channels),
+    )
     split_out = args.promoter_split_out or (args.output_dir / "promoter_split.json")
     save_promoter_split(split_out, promoter_split)
     print(f"Saved promoter split: {split_out}")
@@ -1135,7 +1336,22 @@ def main() -> None:
     if tf_embedding_metadata is not None:
         save_json(args.output_dir / "tf_embedding_metadata.json", tf_embedding_metadata)
 
-    use_val_for_selection = val_loader is not None and args.eval_every > 0
+    validation_loader = val_loader
+    validation_model_tf_tensor = val_tf_tensor if use_tf_holdout and args.label_mode == "tf" else None
+    validation_merge_tf_tensor = train_tf_tensor if args.label_mode == "merged_train_tfs" else None
+    validation_description = "validation promoters"
+    if use_tf_holdout and args.label_mode == "tf":
+        if validation_model_tf_tensor is not None and validation_loader is None:
+            validation_loader = train_eval_loader
+            validation_description = "train promoters with held-out validation TFs"
+        elif validation_model_tf_tensor is not None:
+            validation_description = "validation promoters with held-out validation TFs"
+
+    use_val_for_selection = (
+        validation_loader is not None
+        and args.eval_every > 0
+        and (args.label_mode != "tf" or not use_tf_holdout or validation_model_tf_tensor is not None)
+    )
     best_metric_name = args.selection_metric
     if best_metric_name.startswith("val_") and not use_val_for_selection:
         print(
@@ -1143,6 +1359,8 @@ def main() -> None:
             "falling back to 'train_loss'."
         )
         best_metric_name = "train_loss"
+    elif best_metric_name.startswith("val_"):
+        print(f"Selection metric {best_metric_name!r} uses {validation_description}.")
     best_metric_value: float | None = None
     history: list[dict[str, object]] = []
     for epoch in range(1, args.epochs + 1):
@@ -1153,7 +1371,12 @@ def main() -> None:
             device=device,
             input_mode=args.input_mode,
             pos_weight=pos_weight,
-            tf_indices=train_tf_tensor,
+            model_tf_indices=train_tf_tensor if args.label_mode == "tf" else None,
+            merge_tf_indices=train_tf_tensor if args.label_mode == "merged_train_tfs" else None,
+            label_mode=args.label_mode,
+            loss_name=args.loss,
+            focal_gamma=args.focal_gamma,
+            focal_alpha=args.focal_alpha,
             epoch=epoch,
         )
         if use_val_for_selection and (
@@ -1163,11 +1386,18 @@ def main() -> None:
                 stats,
                 evaluate_dense(
                     model=model,
-                    loader=val_loader,
+                    loader=validation_loader,
                     device=device,
                     input_mode=args.input_mode,
-                    pos_weight=None if use_tf_holdout else pos_weight,
-                    tf_indices=val_tf_tensor if use_tf_holdout else None,
+                    pos_weight=(
+                        None if use_tf_holdout and args.label_mode == "tf" else pos_weight
+                    ),
+                    model_tf_indices=validation_model_tf_tensor,
+                    merge_tf_indices=validation_merge_tf_tensor,
+                    label_mode=args.label_mode,
+                    loss_name=args.loss,
+                    focal_gamma=args.focal_gamma,
+                    focal_alpha=args.focal_alpha,
                     tf_names=dataset.tf_names,
                 ),
             )
@@ -1211,6 +1441,7 @@ def main() -> None:
             args=args,
             dataset=dataset,
             input_channels=input_channels,
+            output_channels=output_channels,
             stats=stats,
             promoter_split=promoter_split,
             tf_split=tf_split,
@@ -1230,6 +1461,7 @@ def main() -> None:
                 args=args,
                 dataset=dataset,
                 input_channels=input_channels,
+                output_channels=output_channels,
                 stats=stats,
                 promoter_split=promoter_split,
                 tf_split=tf_split,
@@ -1244,6 +1476,7 @@ def main() -> None:
                 args=args,
                 dataset=dataset,
                 input_channels=input_channels,
+                output_channels=output_channels,
                 stats=stats,
                 promoter_split=promoter_split,
                 tf_split=tf_split,
@@ -1264,14 +1497,17 @@ def main() -> None:
         "promoter_split_counts": promoter_split["counts"],
         "tf_split_counts": tf_split["counts"],
     }
-    if use_tf_holdout:
+    if use_tf_holdout and args.label_mode == "tf":
         final_jobs = {
             "train_promoters_train_tfs": (train_eval_loader, train_tf_tensor),
-            "val_promoters_val_tfs": (val_loader, val_tf_tensor),
-            "test_promoters_test_tfs": (test_loader, test_tf_tensor),
             "test_promoters_train_tfs": (test_loader, train_tf_tensor),
-            "train_promoters_test_tfs": (train_eval_loader, test_tf_tensor),
         }
+        if val_tf_tensor is not None:
+            final_jobs["train_promoters_val_tfs"] = (train_eval_loader, val_tf_tensor)
+            final_jobs["val_promoters_val_tfs"] = (val_loader, val_tf_tensor)
+        if test_tf_tensor is not None:
+            final_jobs["train_promoters_test_tfs"] = (train_eval_loader, test_tf_tensor)
+            final_jobs["test_promoters_test_tfs"] = (test_loader, test_tf_tensor)
         eval_pos_weight = None
     else:
         final_jobs = {
@@ -1283,7 +1519,7 @@ def main() -> None:
     for split_name, (split_loader, split_tf_tensor) in final_jobs.items():
         if split_loader is None:
             continue
-        if use_tf_holdout and split_tf_tensor is None:
+        if use_tf_holdout and args.label_mode == "tf" and split_tf_tensor is None:
             continue
         split_stats = evaluate_dense(
             model=model,
@@ -1291,7 +1527,12 @@ def main() -> None:
             device=device,
             input_mode=args.input_mode,
             pos_weight=eval_pos_weight,
-            tf_indices=split_tf_tensor,
+            model_tf_indices=split_tf_tensor if args.label_mode == "tf" else None,
+            merge_tf_indices=train_tf_tensor if args.label_mode == "merged_train_tfs" else None,
+            label_mode=args.label_mode,
+            loss_name=args.loss,
+            focal_gamma=args.focal_gamma,
+            focal_alpha=args.focal_alpha,
             tf_names=dataset.tf_names,
         )
         final_metrics[split_name] = asdict(split_stats)

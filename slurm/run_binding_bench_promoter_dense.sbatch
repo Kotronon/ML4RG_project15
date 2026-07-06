@@ -37,6 +37,8 @@ PRE_NMS_FACTOR="${PRE_NMS_FACTOR:-20}"
 SCORE_MODE="${SCORE_MODE:-logit}"
 FEATURE_RANK_METHOD="${FEATURE_RANK_METHOD:-max-score}"
 FEATURE_RANK_NAME="${FEATURE_RANK_NAME:-model_score}"
+FEATURE_NAME_FILTER_PATH="${FEATURE_NAME_FILTER_PATH:-}"
+TARGET_NAME_FILTER_PATH="${TARGET_NAME_FILTER_PATH:-}"
 METHOD_NAME="${METHOD_NAME:-promoter_${INPUT_MODE}_${MODEL}_${SCORE_MODE}_nms${NMS_RADIUS_BP}}"
 DISPLAY_NAME="${DISPLAY_NAME:-Promoter ${INPUT_MODE} ${MODEL} (${SCORE_MODE}, nms=${NMS_RADIUS_BP})}"
 INPUT_DIR="${PROJECT}/working/binding_bench_inputs"
@@ -90,6 +92,8 @@ echo "Peak caller:          ${PEAK_CALLER}"
 echo "Pre-NMS factor:       ${PRE_NMS_FACTOR}"
 echo "Score mode:           ${SCORE_MODE}"
 echo "Feature rank method:  ${FEATURE_RANK_METHOD}"
+echo "Feature name filter:  ${FEATURE_NAME_FILTER_PATH:-<none>}"
+echo "Target name filter:   ${TARGET_NAME_FILTER_PATH:-<none>}"
 echo "Device:               ${DEVICE}"
 
 OPTIONAL_ARGS=()
@@ -116,6 +120,14 @@ if [[ "${INCLUDE_TERMINAL_ATG}" == "true" ]]; then
 fi
 if [[ -n "${MAX_REGIONS}" ]]; then
     OPTIONAL_ARGS+=(--max-regions "${MAX_REGIONS}")
+fi
+
+BINDING_BENCH_FILTER_ARGS=()
+if [[ -n "${FEATURE_NAME_FILTER_PATH}" ]]; then
+    BINDING_BENCH_FILTER_ARGS+=(--feature_name_filter_path "${FEATURE_NAME_FILTER_PATH}")
+fi
+if [[ -n "${TARGET_NAME_FILTER_PATH}" ]]; then
+    BINDING_BENCH_FILTER_ARGS+=(--target_name_filter_path "${TARGET_NAME_FILTER_PATH}")
 fi
 
 "${PYTHON_BIN}" "${EXPORT_SCRIPT}" \
@@ -147,6 +159,7 @@ if [[ -n "${BINDING_BENCH_REPO}" && -d "${BINDING_BENCH_REPO}/src" ]]; then
         --feature_rank_path "${FEATURE_RANKS}" \
         --feature_rank_name "${FEATURE_RANK_NAME}" \
         --display_name "${DISPLAY_NAME}" \
+        "${BINDING_BENCH_FILTER_ARGS[@]}" \
         --overwrite
 else
     "${BINDING_BENCH_BIN}" discrete \
@@ -159,6 +172,7 @@ else
         --feature_rank_path "${FEATURE_RANKS}" \
         --feature_rank_name "${FEATURE_RANK_NAME}" \
         --display_name "${DISPLAY_NAME}" \
+        "${BINDING_BENCH_FILTER_ARGS[@]}" \
         --overwrite
 fi
 

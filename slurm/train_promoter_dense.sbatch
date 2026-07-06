@@ -49,6 +49,10 @@ DROPOUT="${DROPOUT:-0.1}"
 TF_EMBEDDING_DROPOUT="${TF_EMBEDDING_DROPOUT:-0.0}"
 CROSS_ATTENTION_GATE_LOGIT_INIT="${CROSS_ATTENTION_GATE_LOGIT_INIT:--3.0}"
 CROSS_ATTENTION_CONTEXT_POOL_SIZES="${CROSS_ATTENTION_CONTEXT_POOL_SIZES:-4}"
+LABEL_MODE="${LABEL_MODE:-tf}"
+LOSS="${LOSS:-bce}"
+FOCAL_GAMMA="${FOCAL_GAMMA:-2.0}"
+FOCAL_ALPHA="${FOCAL_ALPHA:-}"
 EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 LR="${LR:-0.001}"
@@ -125,6 +129,10 @@ echo "Dropout:              ${DROPOUT}"
 echo "TF emb dropout:       ${TF_EMBEDDING_DROPOUT}"
 echo "CrossAttn gate init:  ${CROSS_ATTENTION_GATE_LOGIT_INIT}"
 echo "CrossAttn pools:      ${CROSS_ATTENTION_CONTEXT_POOL_SIZES}"
+echo "Label mode:           ${LABEL_MODE}"
+echo "Loss:                 ${LOSS}"
+echo "Focal gamma:          ${FOCAL_GAMMA}"
+echo "Focal alpha:          ${FOCAL_ALPHA:-<none>}"
 echo "Epochs:               ${EPOCHS}"
 echo "Batch size:           ${BATCH_SIZE}"
 echo "LR:                   ${LR}"
@@ -200,6 +208,9 @@ fi
 if [[ "${INCLUDE_TERMINAL_ATG}" == "true" ]]; then
     OPTIONAL_ARGS+=(--include-terminal-atg)
 fi
+if [[ -n "${FOCAL_ALPHA}" ]]; then
+    OPTIONAL_ARGS+=(--focal-alpha "${FOCAL_ALPHA}")
+fi
 
 "${PYTHON_BIN}" "${TRAIN_SCRIPT}" \
     --sites-path "${SITES_PATH}" \
@@ -216,6 +227,9 @@ fi
     --tf-embedding-dropout "${TF_EMBEDDING_DROPOUT}" \
     --cross-attention-gate-logit-init "${CROSS_ATTENTION_GATE_LOGIT_INIT}" \
     --cross-attention-context-pool-sizes "${CROSS_ATTENTION_CONTEXT_POOL_SIZES}" \
+    --label-mode "${LABEL_MODE}" \
+    --loss "${LOSS}" \
+    --focal-gamma "${FOCAL_GAMMA}" \
     --epochs "${EPOCHS}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \
