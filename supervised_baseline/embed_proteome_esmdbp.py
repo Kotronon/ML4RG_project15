@@ -85,6 +85,16 @@ def parse_args() -> argparse.Namespace:
         help="How to pool per-residue feature matrices into one vector per protein.",
     )
     parser.add_argument(
+        "--runner-input-mode",
+        choices=("auto", "fasta", "single-sequence"),
+        default="auto",
+        help=(
+            "How to pass proteins to the ESM-DBP runner. The standalone "
+            "code/prediction.py script expects one headerless sequence file per "
+            "protein, while TransBind-style runners may accept a multi-record FASTA."
+        ),
+    )
+    parser.add_argument(
         "--overwrite-work-dir",
         action="store_true",
         help="Delete --work-dir before running ESM-DBP.",
@@ -179,6 +189,18 @@ def write_filtered_fasta(records, path: Path) -> None:
                 handle.write(sequence[start : start + 80] + "\n")
 
 
+def safe_file_stem(value: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
+    return stem or "protein"
+
+
+def write_plain_sequence(record, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    protein_id = str(record.id)
+    sequence = clean_sequence(str(record.seq))
+    path.write_text(f">{protein_id}\n{sequence}\n")
+
+
 def runner_candidates(model_dir: Path, code_dir: Path | None) -> list[Path]:
     roots = [model_dir]
     if code_dir is not None:
@@ -221,22 +243,48 @@ def run_esm_dbp(
     runner: Path,
     model_dir: Path,
     fasta: Path,
+    records,
     output_dir: Path,
     device: str,
     python_bin: str,
+    runner_input_mode: str,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    command = [
-        python_bin,
-        str(runner),
-        str(model_dir),
-        str(fasta),
-        str(output_dir),
-        device,
-    ]
-    print("Running ESM-DBP:")
-    print(" ".join(command))
-    subprocess.run(command, check=True, cwd=runner.parent)
+    mode = runner_input_mode
+    if mode == "auto":
+        mode = "single-sequence" if runner.name.lower() in {"prediction.py", "prediciton.py"} else "fasta"
+
+    if mode == "fasta":
+        command = [
+            python_bin,
+            str(runner),
+            str(model_dir),
+            str(fasta),
+            str(output_dir),
+            device,
+        ]
+        print("Running ESM-DBP:")
+        print(" ".join(command))
+        subprocess.run(command, check=True, cwd=runner.parent)
+        return
+
+    single_dir = output_dir / "_single_sequence_inputs"
+    single_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Running ESM-DBP one protein at a time for {len(records)} proteins")
+    for idx, record in enumerate(records, start=1):
+        protein_id = str(record.id)
+        sequence_path = single_dir / safe_file_stem(protein_id)
+        write_plain_sequence(record, sequence_path)
+        command = [
+            python_bin,
+            str(runner),
+            str(model_dir),
+            str(sequence_path),
+            str(output_dir),
+            device,
+        ]
+        print(f"[{idx}/{len(records)}] {protein_id}")
+        subprocess.run(command, check=True, cwd=runner.parent)
 
 
 def _as_float_array(value) -> np.ndarray:
@@ -411,9 +459,11 @@ def main() -> None:
                 runner=runner,
                 model_dir=args.model_dir,
                 fasta=filtered_fasta,
+                records=records,
                 output_dir=tmp_feature_dir,
                 device=args.device,
                 python_bin=python_bin,
+                runner_input_mode=args.runner_input_mode,
             )
             if feature_dir.exists():
                 shutil.rmtree(feature_dir)

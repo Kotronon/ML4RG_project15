@@ -25,7 +25,7 @@ try:
         nms_indices,
         sequence_name_for_region,
     )
-    from .model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations
+    from .model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations, parse_int_tuple
     from .tf_embeddings import load_tf_embeddings
     from .train_promoter_dense import collate_promoter_batch, prepare_x
 except ImportError:
@@ -42,7 +42,7 @@ except ImportError:
         nms_indices,
         sequence_name_for_region,
     )
-    from model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations
+    from model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations, parse_int_tuple
     from tf_embeddings import load_tf_embeddings
     from train_promoter_dense import collate_promoter_batch, prepare_x
 
@@ -51,6 +51,8 @@ DEFAULT_PROJECT = Path("/s/project/ml4rg_students/2026/project15")
 DEFAULT_INPUT_DIR = DEFAULT_PROJECT / "working/binding_bench_inputs"
 PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_res_dilated_cnn",
+    "dense_protein_local_attention",
+    "dense_protein_motif_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )
@@ -218,6 +220,54 @@ def resolve_export_config(
         "cross_attention_context_pool_sizes",
         saved_args.get("cross_attention_context_pool_sizes", "4"),
     )
+    dna_attention_window_bp = int(
+        saved_config.get(
+            "dna_attention_window_bp",
+            saved_args.get("dna_attention_window_bp", 50),
+        )
+    )
+    dna_attention_layers = int(
+        saved_config.get(
+            "dna_attention_layers",
+            saved_args.get("dna_attention_layers", 2),
+        )
+    )
+    dna_attention_heads = int(
+        saved_config.get(
+            "dna_attention_heads",
+            saved_args.get("dna_attention_heads", 8),
+        )
+    )
+    dna_attention_ffn_multiplier = float(
+        saved_config.get(
+            "dna_attention_ffn_multiplier",
+            saved_args.get("dna_attention_ffn_multiplier", 4.0),
+        )
+    )
+    motif_kernel_sizes_raw = saved_config.get(
+        "motif_kernel_sizes",
+        saved_args.get("motif_kernel_sizes", "7,11,15"),
+    )
+    protein_noise_std = float(
+        saved_config.get("protein_noise_std", saved_args.get("protein_noise_std", 0.0))
+    )
+    protein_l2_normalize = bool(
+        saved_config.get(
+            "protein_l2_normalize",
+            saved_args.get("protein_l2_normalize", False),
+        )
+    )
+    scorer = str(saved_config.get("scorer", saved_args.get("scorer", "multihead_bilinear")))
+    scorer_heads = int(saved_config.get("scorer_heads", saved_args.get("scorer_heads", 8)))
+    scorer_pair_dim = int(
+        saved_config.get("scorer_pair_dim", saved_args.get("scorer_pair_dim", 32))
+    )
+    scorer_hidden_dim = int(
+        saved_config.get("scorer_hidden_dim", saved_args.get("scorer_hidden_dim", 128))
+    )
+    scorer_bias_mode = str(
+        saved_config.get("scorer_bias_mode", saved_args.get("scorer_bias_mode", "tf"))
+    )
 
     sites_path = args.sites_path or arg_path(saved_args.get("sites_path"), DEFAULT_SITES_PATH)
     regions_path = args.regions_path or arg_path(saved_args.get("regions_path"), DEFAULT_REGIONS_PATH)
@@ -296,6 +346,18 @@ def resolve_export_config(
         "cross_attention_context_pool_sizes": parse_dilations(
             cross_attention_context_pool_sizes_raw
         ),
+        "dna_attention_window_bp": dna_attention_window_bp,
+        "dna_attention_layers": dna_attention_layers,
+        "dna_attention_heads": dna_attention_heads,
+        "dna_attention_ffn_multiplier": dna_attention_ffn_multiplier,
+        "motif_kernel_sizes": parse_int_tuple(motif_kernel_sizes_raw),
+        "protein_noise_std": protein_noise_std,
+        "protein_l2_normalize": protein_l2_normalize,
+        "scorer": scorer,
+        "scorer_heads": scorer_heads,
+        "scorer_pair_dim": scorer_pair_dim,
+        "scorer_hidden_dim": scorer_hidden_dim,
+        "scorer_bias_mode": scorer_bias_mode,
         "sites_path": sites_path,
         "regions_path": regions_path,
         "embeddings_path": embeddings_path,
@@ -620,6 +682,18 @@ def main() -> None:
         cross_attention_context_pool_sizes=config[
             "cross_attention_context_pool_sizes"
         ],
+        dna_attention_window_bp=int(config["dna_attention_window_bp"]),
+        dna_attention_layers=int(config["dna_attention_layers"]),
+        dna_attention_heads=int(config["dna_attention_heads"]),
+        dna_attention_ffn_multiplier=float(config["dna_attention_ffn_multiplier"]),
+        motif_kernel_sizes=config["motif_kernel_sizes"],
+        protein_noise_std=float(config["protein_noise_std"]),
+        protein_l2_normalize=bool(config["protein_l2_normalize"]),
+        scorer=str(config["scorer"]),
+        scorer_heads=int(config["scorer_heads"]),
+        scorer_pair_dim=int(config["scorer_pair_dim"]),
+        scorer_hidden_dim=int(config["scorer_hidden_dim"]),
+        scorer_bias_mode=str(config["scorer_bias_mode"]),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()

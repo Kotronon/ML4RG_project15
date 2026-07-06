@@ -42,6 +42,9 @@ MIN_SITES_PER_TF="${MIN_SITES_PER_TF:-15}"
 MAX_REGIONS="${MAX_REGIONS:-}"
 SEQUENCE_ORIENTATION="${SEQUENCE_ORIENTATION:-strand-aware}"
 INCLUDE_TERMINAL_ATG="${INCLUDE_TERMINAL_ATG:-false}"
+LABEL_SMOOTHING_MODE="${LABEL_SMOOTHING_MODE:-hard}"
+LABEL_SMOOTHING_RADIUS_BP="${LABEL_SMOOTHING_RADIUS_BP:-0}"
+LABEL_SMOOTHING_SIGMA_BP="${LABEL_SMOOTHING_SIGMA_BP:-}"
 HIDDEN_CHANNELS="${HIDDEN_CHANNELS:-128}"
 KERNEL_SIZE="${KERNEL_SIZE:-7}"
 DILATIONS="${DILATIONS:-1,2,4,8,16}"
@@ -49,10 +52,20 @@ DROPOUT="${DROPOUT:-0.1}"
 TF_EMBEDDING_DROPOUT="${TF_EMBEDDING_DROPOUT:-0.0}"
 CROSS_ATTENTION_GATE_LOGIT_INIT="${CROSS_ATTENTION_GATE_LOGIT_INIT:--3.0}"
 CROSS_ATTENTION_CONTEXT_POOL_SIZES="${CROSS_ATTENTION_CONTEXT_POOL_SIZES:-4}"
-LABEL_MODE="${LABEL_MODE:-tf}"
-LOSS="${LOSS:-bce}"
-FOCAL_GAMMA="${FOCAL_GAMMA:-2.0}"
-FOCAL_ALPHA="${FOCAL_ALPHA:-}"
+
+DNA_ATTENTION_WINDOW_BP="${DNA_ATTENTION_WINDOW_BP:-50}"
+DNA_ATTENTION_LAYERS="${DNA_ATTENTION_LAYERS:-2}"
+DNA_ATTENTION_HEADS="${DNA_ATTENTION_HEADS:-8}"
+DNA_ATTENTION_FFN_MULTIPLIER="${DNA_ATTENTION_FFN_MULTIPLIER:-4.0}"
+MOTIF_KERNEL_SIZES="${MOTIF_KERNEL_SIZES:-7,11,15}"
+PROTEIN_NOISE_STD="${PROTEIN_NOISE_STD:-0.0}"
+PROTEIN_L2_NORMALIZE="${PROTEIN_L2_NORMALIZE:-false}"
+SCORER="${SCORER:-multihead_bilinear}"
+SCORER_HEADS="${SCORER_HEADS:-8}"
+SCORER_PAIR_DIM="${SCORER_PAIR_DIM:-32}"
+SCORER_HIDDEN_DIM="${SCORER_HIDDEN_DIM:-128}"
+SCORER_BIAS_MODE="${SCORER_BIAS_MODE:-tf}"
+
 EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 LR="${LR:-0.001}"
@@ -129,10 +142,20 @@ echo "Dropout:              ${DROPOUT}"
 echo "TF emb dropout:       ${TF_EMBEDDING_DROPOUT}"
 echo "CrossAttn gate init:  ${CROSS_ATTENTION_GATE_LOGIT_INIT}"
 echo "CrossAttn pools:      ${CROSS_ATTENTION_CONTEXT_POOL_SIZES}"
-echo "Label mode:           ${LABEL_MODE}"
-echo "Loss:                 ${LOSS}"
-echo "Focal gamma:          ${FOCAL_GAMMA}"
-echo "Focal alpha:          ${FOCAL_ALPHA:-<none>}"
+
+echo "DNA attn window bp:   ${DNA_ATTENTION_WINDOW_BP}"
+echo "DNA attn layers:      ${DNA_ATTENTION_LAYERS}"
+echo "DNA attn heads:       ${DNA_ATTENTION_HEADS}"
+echo "DNA attn FFN mult:    ${DNA_ATTENTION_FFN_MULTIPLIER}"
+echo "Motif kernel sizes:   ${MOTIF_KERNEL_SIZES}"
+echo "Protein noise std:    ${PROTEIN_NOISE_STD}"
+echo "Protein L2 normalize: ${PROTEIN_L2_NORMALIZE}"
+echo "Scorer:               ${SCORER}"
+echo "Scorer heads:         ${SCORER_HEADS}"
+echo "Scorer pair dim:      ${SCORER_PAIR_DIM}"
+echo "Scorer hidden dim:    ${SCORER_HIDDEN_DIM}"
+echo "Scorer bias mode:     ${SCORER_BIAS_MODE}"
+
 echo "Epochs:               ${EPOCHS}"
 echo "Batch size:           ${BATCH_SIZE}"
 echo "LR:                   ${LR}"
@@ -157,6 +180,9 @@ echo "TF test names:        ${TF_TEST_NAMES:-<none>}"
 echo "TF sim threshold:     ${TF_SIMILARITY_THRESHOLD}"
 echo "Sequence orientation: ${SEQUENCE_ORIENTATION}"
 echo "Include terminal ATG: ${INCLUDE_TERMINAL_ATG}"
+echo "Label smoothing mode: ${LABEL_SMOOTHING_MODE}"
+echo "Label smooth radius:  ${LABEL_SMOOTHING_RADIUS_BP}"
+echo "Label smooth sigma:   ${LABEL_SMOOTHING_SIGMA_BP:-<auto>}"
 echo "No pos weight:        ${NO_POS_WEIGHT}"
 echo "Selection metric:     ${SELECTION_METRIC}"
 echo "Extra args:           ${EXTRA_ARGS}"
@@ -208,8 +234,13 @@ fi
 if [[ "${INCLUDE_TERMINAL_ATG}" == "true" ]]; then
     OPTIONAL_ARGS+=(--include-terminal-atg)
 fi
-if [[ -n "${FOCAL_ALPHA}" ]]; then
-    OPTIONAL_ARGS+=(--focal-alpha "${FOCAL_ALPHA}")
+
+if [[ -n "${LABEL_SMOOTHING_SIGMA_BP}" ]]; then
+    OPTIONAL_ARGS+=(--label-smoothing-sigma-bp "${LABEL_SMOOTHING_SIGMA_BP}")
+fi
+if [[ "${PROTEIN_L2_NORMALIZE}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--protein-l2-normalize)
+
 fi
 
 "${PYTHON_BIN}" "${TRAIN_SCRIPT}" \
@@ -219,6 +250,8 @@ fi
     --output-dir "${OUTPUT_DIR}" \
     --min-sites-per-tf "${MIN_SITES_PER_TF}" \
     --sequence-orientation "${SEQUENCE_ORIENTATION}" \
+    --label-smoothing-mode "${LABEL_SMOOTHING_MODE}" \
+    --label-smoothing-radius-bp "${LABEL_SMOOTHING_RADIUS_BP}" \
     --model "${MODEL}" \
     --hidden-channels "${HIDDEN_CHANNELS}" \
     --kernel-size "${KERNEL_SIZE}" \
@@ -227,9 +260,17 @@ fi
     --tf-embedding-dropout "${TF_EMBEDDING_DROPOUT}" \
     --cross-attention-gate-logit-init "${CROSS_ATTENTION_GATE_LOGIT_INIT}" \
     --cross-attention-context-pool-sizes "${CROSS_ATTENTION_CONTEXT_POOL_SIZES}" \
-    --label-mode "${LABEL_MODE}" \
-    --loss "${LOSS}" \
-    --focal-gamma "${FOCAL_GAMMA}" \
+    --dna-attention-window-bp "${DNA_ATTENTION_WINDOW_BP}" \
+    --dna-attention-layers "${DNA_ATTENTION_LAYERS}" \
+    --dna-attention-heads "${DNA_ATTENTION_HEADS}" \
+    --dna-attention-ffn-multiplier "${DNA_ATTENTION_FFN_MULTIPLIER}" \
+    --motif-kernel-sizes "${MOTIF_KERNEL_SIZES}" \
+    --protein-noise-std "${PROTEIN_NOISE_STD}" \
+    --scorer "${SCORER}" \
+    --scorer-heads "${SCORER_HEADS}" \
+    --scorer-pair-dim "${SCORER_PAIR_DIM}" \
+    --scorer-hidden-dim "${SCORER_HIDDEN_DIM}" \
+    --scorer-bias-mode "${SCORER_BIAS_MODE}" \
     --epochs "${EPOCHS}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \

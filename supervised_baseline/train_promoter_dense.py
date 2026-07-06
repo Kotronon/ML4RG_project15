@@ -19,7 +19,7 @@ try:
         DEFAULT_REGIONS_PATH,
         DEFAULT_SITES_PATH,
     )
-    from .model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations
+    from .model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations, parse_int_tuple
     from .promoter_splits import (
         load_promoter_split,
         make_all_train_split,
@@ -48,7 +48,7 @@ except ImportError:
         DEFAULT_REGIONS_PATH,
         DEFAULT_SITES_PATH,
     )
-    from model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations
+    from model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations, parse_int_tuple
     from promoter_splits import (
         load_promoter_split,
         make_all_train_split,
@@ -78,6 +78,8 @@ DEFAULT_MODEL_ROOT = Path(
 )
 PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_res_dilated_cnn",
+    "dense_protein_local_attention",
+    "dense_protein_motif_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )
@@ -196,6 +198,30 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--label-smoothing-mode",
+        choices=("hard", "hard-dilate", "linear", "gaussian"),
+        default="hard",
+        help=(
+            "Training target used for dense labels. 'hard' keeps exact BindingBench "
+            "intervals; the other modes soften labels within --label-smoothing-radius-bp. "
+            "Evaluation metrics still use the original hard intervals."
+        ),
+    )
+    parser.add_argument(
+        "--label-smoothing-radius-bp",
+        type=int,
+        default=0,
+        help="Radius in bp around each true binding interval for softened training labels.",
+    )
+    parser.add_argument(
+        "--label-smoothing-sigma-bp",
+        type=float,
+        help=(
+            "Gaussian sigma in bp for --label-smoothing-mode gaussian. "
+            "Defaults to half the radius."
+        ),
+    )
+    parser.add_argument(
         "--model",
         choices=DENSE_MODEL_NAMES,
         default="dense_small_cnn",
@@ -231,33 +257,80 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--label-mode",
-        choices=LABEL_MODES,
+        "--dna-attention-window-bp",
+        type=int,
+        default=50,
+        help=(
+            "Local self-attention radius in bp for dense_protein_local_attention. "
+            "Use 0 for full promoter self-attention."
+        ),
+    )
+    parser.add_argument(
+        "--dna-attention-layers",
+        type=int,
+        default=2,
+        help="Number of local DNA self-attention blocks.",
+    )
+    parser.add_argument(
+        "--dna-attention-heads",
+        type=int,
+        default=8,
+        help="Number of heads in each local DNA self-attention block.",
+    )
+    parser.add_argument(
+        "--dna-attention-ffn-multiplier",
+        type=float,
+        default=4.0,
+        help="Feed-forward width multiplier inside local DNA self-attention blocks.",
+    )
+    parser.add_argument(
+        "--motif-kernel-sizes",
+        default="7,11,15",
+        help=(
+            "Comma-separated odd convolution widths for dense_protein_motif_cnn's "
+            "raw motif stem."
+        ),
+    )
+    parser.add_argument(
+        "--protein-noise-std",
+        type=float,
+        default=0.0,
+        help="Gaussian noise std added to TF embeddings during training.",
+    )
+    parser.add_argument(
+        "--protein-l2-normalize",
+        action="store_true",
+        help="L2-normalize adapted TF vectors before scoring.",
+    )
+    parser.add_argument(
+        "--scorer",
+        choices=("multihead_bilinear", "mlp"),
+        default="multihead_bilinear",
+        help="TF-DNA interaction scorer for dense_protein_local_attention.",
+    )
+    parser.add_argument(
+        "--scorer-heads",
+        type=int,
+        default=8,
+        help="Interaction heads for the multi-head bilinear scorer.",
+    )
+    parser.add_argument(
+        "--scorer-pair-dim",
+        type=int,
+        default=32,
+        help="Per-head dimension for bilinear scorer or pair embedding dim for MLP scorer.",
+    )
+    parser.add_argument(
+        "--scorer-hidden-dim",
+        type=int,
+        default=128,
+        help="Hidden dimension for the MLP scorer.",
+    )
+    parser.add_argument(
+        "--scorer-bias-mode",
+        choices=("none", "tf", "dna", "both"),
         default="tf",
-        help=(
-            "Use per-TF dense labels, or collapse labels into one DNA-only "
-            "channel using training TFs only."
-        ),
-    )
-    parser.add_argument(
-        "--loss",
-        choices=LOSS_NAMES,
-        default="bce",
-        help="Dense training loss.",
-    )
-    parser.add_argument(
-        "--focal-gamma",
-        type=float,
-        default=2.0,
-        help="Focusing exponent for --loss focal.",
-    )
-    parser.add_argument(
-        "--focal-alpha",
-        type=float,
-        help=(
-            "Optional focal alpha for positives. Leave unset to use only "
-            "--pos-weight with focal modulation."
-        ),
+        help="Optional additive bias terms in the protein-conditioned scorer.",
     )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -399,7 +472,32 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--label-mode merged_train_tfs is intended for DNA-only models")
     if not 0.0 <= args.tf_embedding_dropout < 1.0:
         raise ValueError("--tf-embedding-dropout must be in [0, 1)")
+    if args.dna_attention_window_bp < 0:
+        raise ValueError("--dna-attention-window-bp must be non-negative")
+    if args.dna_attention_layers <= 0:
+        raise ValueError("--dna-attention-layers must be positive")
+    if args.dna_attention_heads <= 0:
+        raise ValueError("--dna-attention-heads must be positive")
+    if args.dna_attention_ffn_multiplier <= 0:
+        raise ValueError("--dna-attention-ffn-multiplier must be positive")
+    if args.protein_noise_std < 0:
+        raise ValueError("--protein-noise-std must be non-negative")
+    if args.scorer_heads <= 0:
+        raise ValueError("--scorer-heads must be positive")
+    if args.scorer_pair_dim <= 0:
+        raise ValueError("--scorer-pair-dim must be positive")
+    if args.scorer_hidden_dim <= 0:
+        raise ValueError("--scorer-hidden-dim must be positive")
+    if args.label_smoothing_radius_bp < 0:
+        raise ValueError("--label-smoothing-radius-bp must be non-negative")
+    if args.label_smoothing_sigma_bp is not None and args.label_smoothing_sigma_bp <= 0:
+        raise ValueError("--label-smoothing-sigma-bp must be positive")
+    if args.label_smoothing_mode != "hard" and args.label_smoothing_radius_bp <= 0:
+        raise ValueError(
+            "--label-smoothing-radius-bp must be positive when label smoothing is enabled"
+        )
     parse_dilations(args.cross_attention_context_pool_sizes)
+    parse_int_tuple(args.motif_kernel_sizes)
     if args.output_dir is None:
         args.output_dir = DEFAULT_MODEL_ROOT / f"promoter_{args.input_mode}_{args.model}"
     return args
@@ -444,6 +542,9 @@ def build_dataset(
         "tf_name_filter": tf_name_filter,
         "max_regions": args.max_regions,
         "trim_terminal_atg": not args.include_terminal_atg,
+        "label_smoothing_mode": args.label_smoothing_mode,
+        "label_smoothing_radius_bp": args.label_smoothing_radius_bp,
+        "label_smoothing_sigma_bp": args.label_smoothing_sigma_bp,
     }
     if args.input_mode == "raw":
         return BindingBenchPromoterSequenceDataset(**common)
@@ -622,10 +723,14 @@ def collate_promoter_batch(
     y0 = items[0]["y"]
     if not isinstance(y0, torch.Tensor):
         raise TypeError("Dataset y must be a torch.Tensor")
+    hard_y0 = items[0].get("hard_y", y0)
+    if not isinstance(hard_y0, torch.Tensor):
+        raise TypeError("Dataset hard_y must be a torch.Tensor")
     max_len = max(int(item["y"].shape[-1]) for item in items)
     n_tfs = int(y0.shape[0])
 
     y_batch = torch.zeros((len(items), n_tfs, max_len), dtype=torch.float32)
+    hard_y_batch = torch.zeros((len(items), n_tfs, max_len), dtype=torch.float32)
     mask_batch = torch.zeros((len(items), max_len), dtype=torch.bool)
 
     if input_mode == "raw":
@@ -637,10 +742,12 @@ def collate_promoter_batch(
         for idx, item in enumerate(items):
             x = item["x"]
             y = item["y"]
+            hard_y = item.get("hard_y", y)
             mask = item["mask"]
             length = int(y.shape[-1])
             x_batch[idx, :, :length] = x
             y_batch[idx, :, :length] = y
+            hard_y_batch[idx, :, :length] = hard_y
             mask_batch[idx, :length] = mask
     elif input_mode == "embedding":
         x0 = items[0]["x"]
@@ -651,10 +758,12 @@ def collate_promoter_batch(
         for idx, item in enumerate(items):
             x = item["x"]
             y = item["y"]
+            hard_y = item.get("hard_y", y)
             mask = item["mask"]
             length = int(y.shape[-1])
             x_batch[idx, :length, :] = x
             y_batch[idx, :, :length] = y
+            hard_y_batch[idx, :, :length] = hard_y
             mask_batch[idx, :length] = mask
     else:
         raise ValueError(f"Unsupported input mode: {input_mode}")
@@ -662,6 +771,7 @@ def collate_promoter_batch(
     return {
         "x": x_batch,
         "y": y_batch,
+        "hard_y": hard_y_batch,
         "mask": mask_batch,
         "meta": [item["meta"] for item in items],
     }
@@ -678,10 +788,8 @@ def compute_dense_pos_weight(
     for record in records:
         mask = dataset._position_mask(record)
         valid_positions += float(mask.sum())
-        labels = np.zeros((len(dataset.tf_names), len(record.sequence)), dtype=bool)
-        for tf_idx, lo, hi in record.label_intervals:
-            labels[tf_idx, lo:hi] = True
-        labels[:, ~mask] = False
+        labels = dataset._dense_labels(record)
+        labels[:, ~mask] = 0.0
         positives += labels.sum(axis=1)
 
     negatives = valid_positions - positives
@@ -876,6 +984,18 @@ def model_config_from_args(
         "cross_attention_context_pool_sizes": list(
             parse_dilations(args.cross_attention_context_pool_sizes)
         ),
+        "dna_attention_window_bp": args.dna_attention_window_bp,
+        "dna_attention_layers": args.dna_attention_layers,
+        "dna_attention_heads": args.dna_attention_heads,
+        "dna_attention_ffn_multiplier": args.dna_attention_ffn_multiplier,
+        "motif_kernel_sizes": list(parse_int_tuple(args.motif_kernel_sizes)),
+        "protein_noise_std": args.protein_noise_std,
+        "protein_l2_normalize": args.protein_l2_normalize,
+        "scorer": args.scorer,
+        "scorer_heads": args.scorer_heads,
+        "scorer_pair_dim": args.scorer_pair_dim,
+        "scorer_hidden_dim": args.scorer_hidden_dim,
+        "scorer_bias_mode": args.scorer_bias_mode,
         "embeddings_path": str(args.embeddings_path) if args.embeddings_path else None,
         "embedding_column": args.embedding_column,
         "embedding_key_column": args.embedding_key_column,
@@ -886,6 +1006,9 @@ def model_config_from_args(
         "drop_missing_tf_embeddings": args.drop_missing_tf_embeddings,
         "tf_name_filter_from_embeddings": args.tf_name_filter_from_embeddings,
         "trim_terminal_atg": not args.include_terminal_atg,
+        "label_smoothing_mode": args.label_smoothing_mode,
+        "label_smoothing_radius_bp": args.label_smoothing_radius_bp,
+        "label_smoothing_sigma_bp": args.label_smoothing_sigma_bp,
     }
 
 
@@ -954,32 +1077,21 @@ def train_one_epoch(
     for batch in loader:
         x = prepare_x(batch["x"].to(device, non_blocking=True), input_mode)
         y = batch["y"].to(device, non_blocking=True)
+        hard_y = batch["hard_y"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        logits = forward_dense_model(model, x, model_tf_indices)
-        y = make_dense_targets(
-            y,
-            label_mode=label_mode,
-            model_tf_indices=model_tf_indices,
-            merge_tf_indices=merge_tf_indices,
-        )
-        batch_pos_weight = (
-            select_tf_axis(pos_weight, model_tf_indices)
-            if pos_weight is not None and label_mode == "tf"
-            else pos_weight
-        )
+        logits = forward_dense_model(model, x, tf_indices)
+        y = select_tf_axis(y, tf_indices)
+        hard_y = select_tf_axis(hard_y, tf_indices)
+        batch_pos_weight = select_tf_axis(pos_weight, tf_indices) if pos_weight is not None else None
         if logits.shape != y.shape:
             raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
-        loss = dense_loss(
-            logits,
-            y,
-            mask,
-            batch_pos_weight,
-            loss_name=loss_name,
-            focal_gamma=focal_gamma,
-            focal_alpha=focal_alpha,
-        )
+        if logits.shape != hard_y.shape:
+            raise ValueError(
+                f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
+            )
+        loss = dense_bce_loss(logits, y, mask, batch_pos_weight)
         loss.backward()
         optimizer.step()
 
@@ -990,7 +1102,7 @@ def train_one_epoch(
         with torch.no_grad():
             valid = mask.unsqueeze(1).expand_as(logits)
             pred = logits.sigmoid() >= 0.5
-            target = y >= 0.5
+            target = hard_y >= 0.5
             tp += (pred & target & valid).sum().item()
             fp += (pred & ~target & valid).sum().item()
             fn += (~pred & target & valid).sum().item()
@@ -1055,15 +1167,12 @@ def evaluate_dense(
         for batch in loader:
             x = prepare_x(batch["x"].to(device, non_blocking=True), input_mode)
             y = batch["y"].to(device, non_blocking=True)
+            hard_y = batch["hard_y"].to(device, non_blocking=True)
             mask = batch["mask"].to(device, non_blocking=True)
 
-            logits = forward_dense_model(model, x, model_tf_indices)
-            y = make_dense_targets(
-                y,
-                label_mode=label_mode,
-                model_tf_indices=model_tf_indices,
-                merge_tf_indices=merge_tf_indices,
-            )
+            logits = forward_dense_model(model, x, tf_indices)
+            y = select_tf_axis(y, tf_indices)
+            hard_y = select_tf_axis(hard_y, tf_indices)
             batch_pos_weight = (
                 select_tf_axis(pos_weight, model_tf_indices)
                 if pos_weight is not None and label_mode == "tf"
@@ -1073,15 +1182,11 @@ def evaluate_dense(
                 batch_pos_weight = pos_weight
             if logits.shape != y.shape:
                 raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
-            loss = dense_loss(
-                logits,
-                y,
-                mask,
-                batch_pos_weight,
-                loss_name=loss_name,
-                focal_gamma=focal_gamma,
-                focal_alpha=focal_alpha,
-            )
+            if logits.shape != hard_y.shape:
+                raise ValueError(
+                    f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
+                )
+            loss = dense_bce_loss(logits, y, mask, batch_pos_weight)
 
             batch_size = x.shape[0]
             total_loss += float(loss.detach().cpu()) * batch_size
@@ -1089,7 +1194,7 @@ def evaluate_dense(
 
             valid = mask.unsqueeze(1).expand_as(logits)
             pred = logits.sigmoid() >= 0.5
-            target = y >= 0.5
+            target = hard_y >= 0.5
             tp += (pred & target & valid).sum().item()
             fp += (pred & ~target & valid).sum().item()
             fn += (~pred & target & valid).sum().item()
@@ -1288,6 +1393,18 @@ def main() -> None:
         cross_attention_context_pool_sizes=parse_dilations(
             args.cross_attention_context_pool_sizes
         ),
+        dna_attention_window_bp=args.dna_attention_window_bp,
+        dna_attention_layers=args.dna_attention_layers,
+        dna_attention_heads=args.dna_attention_heads,
+        dna_attention_ffn_multiplier=args.dna_attention_ffn_multiplier,
+        motif_kernel_sizes=parse_int_tuple(args.motif_kernel_sizes),
+        protein_noise_std=args.protein_noise_std,
+        protein_l2_normalize=args.protein_l2_normalize,
+        scorer=args.scorer,
+        scorer_heads=args.scorer_heads,
+        scorer_pair_dim=args.scorer_pair_dim,
+        scorer_hidden_dim=args.scorer_hidden_dim,
+        scorer_bias_mode=args.scorer_bias_mode,
     ).to(device)
     print("Trainable parameters:", count_parameters(model))
 

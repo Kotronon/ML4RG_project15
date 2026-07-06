@@ -271,6 +271,475 @@ class DenseProteinResDilatedCNN(nn.Module):
         return logits
 
 
+class LocalSelfAttentionBlock(nn.Module):
+    """Pre-norm self-attention block with an optional local sequence window."""
+
+    def __init__(
+        self,
+        hidden_channels: int,
+        *,
+        num_heads: int = 8,
+        window_bp: int = 50,
+        ffn_multiplier: float = 4.0,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        if hidden_channels % num_heads != 0:
+            raise ValueError("hidden_channels must be divisible by num_heads")
+        if window_bp < 0:
+            raise ValueError("window_bp must be non-negative")
+        if ffn_multiplier <= 0:
+            raise ValueError("ffn_multiplier must be positive")
+
+        self.window_bp = int(window_bp)
+        self.attn_norm = nn.LayerNorm(hidden_channels)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=hidden_channels,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.dropout = nn.Dropout(dropout)
+        ffn_channels = max(hidden_channels, int(round(hidden_channels * ffn_multiplier)))
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, ffn_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_channels, hidden_channels),
+            nn.Dropout(dropout),
+        )
+
+    def _attention_mask(self, length: int, device: torch.device) -> torch.Tensor | None:
+        if self.window_bp == 0:
+            return None
+        positions = torch.arange(length, device=device)
+        return (positions[:, None] - positions[None, :]).abs() > self.window_bp
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        attn_input = self.attn_norm(x)
+        attended, _ = self.attn(
+            query=attn_input,
+            key=attn_input,
+            value=attn_input,
+            attn_mask=self._attention_mask(x.shape[1], x.device),
+            need_weights=False,
+        )
+        x = x + self.dropout(attended)
+        return x + self.ffn(x)
+
+
+class MultiHeadBilinearScorer(nn.Module):
+    """Factorized TF-position compatibility scorer."""
+
+    def __init__(
+        self,
+        hidden_channels: int,
+        *,
+        num_heads: int = 8,
+        head_dim: int = 32,
+        dropout: float = 0.1,
+        bias_mode: str = "tf",
+    ) -> None:
+        super().__init__()
+        if num_heads <= 0:
+            raise ValueError("num_heads must be positive")
+        if head_dim <= 0:
+            raise ValueError("head_dim must be positive")
+        if bias_mode not in {"none", "tf", "dna", "both"}:
+            raise ValueError("bias_mode must be one of none, tf, dna, both")
+
+        self.num_heads = int(num_heads)
+        self.head_dim = int(head_dim)
+        self.bias_mode = bias_mode
+        self.dropout = nn.Dropout(dropout)
+        self.dna_projection = nn.Linear(hidden_channels, num_heads * head_dim)
+        self.tf_projection = nn.Linear(hidden_channels, num_heads * head_dim)
+        self.head_weights = nn.Parameter(torch.zeros(num_heads))
+        self.dna_bias = nn.Linear(hidden_channels, 1) if bias_mode in {"dna", "both"} else None
+        self.tf_bias = nn.Linear(hidden_channels, 1) if bias_mode in {"tf", "both"} else None
+        self.score_scale = head_dim ** -0.5
+
+    def forward(self, dna: torch.Tensor, tf: torch.Tensor) -> torch.Tensor:
+        batch_size, length, _ = dna.shape
+        n_tfs = tf.shape[0]
+
+        dna_heads = self.dna_projection(self.dropout(dna)).view(
+            batch_size,
+            length,
+            self.num_heads,
+            self.head_dim,
+        )
+        tf_heads = self.tf_projection(self.dropout(tf)).view(
+            n_tfs,
+            self.num_heads,
+            self.head_dim,
+        )
+        head_weights = torch.softmax(self.head_weights, dim=0)
+        logits = torch.einsum("blhd,thd,h->btl", dna_heads, tf_heads, head_weights)
+        logits = logits * self.score_scale
+
+        if self.dna_bias is not None:
+            logits = logits + self.dna_bias(dna).squeeze(-1).unsqueeze(1)
+        if self.tf_bias is not None:
+            logits = logits + self.tf_bias(tf).view(1, -1, 1)
+        return logits
+
+
+class MLPInteractionScorer(nn.Module):
+    """Small interaction MLP over DNA/TF pair features."""
+
+    def __init__(
+        self,
+        hidden_channels: int,
+        *,
+        pair_dim: int = 64,
+        scorer_hidden_dim: int = 128,
+        dropout: float = 0.1,
+        bias_mode: str = "tf",
+    ) -> None:
+        super().__init__()
+        if pair_dim <= 0:
+            raise ValueError("pair_dim must be positive")
+        if scorer_hidden_dim <= 0:
+            raise ValueError("scorer_hidden_dim must be positive")
+        if bias_mode not in {"none", "tf", "dna", "both"}:
+            raise ValueError("bias_mode must be one of none, tf, dna, both")
+
+        self.bias_mode = bias_mode
+        self.dna_projection = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, pair_dim),
+            nn.GELU(),
+        )
+        self.tf_projection = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, pair_dim),
+            nn.GELU(),
+        )
+        self.mlp = nn.Sequential(
+            nn.Linear(pair_dim * 3, scorer_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(scorer_hidden_dim, 1),
+        )
+        self.dna_bias = nn.Linear(hidden_channels, 1) if bias_mode in {"dna", "both"} else None
+        self.tf_bias = nn.Linear(hidden_channels, 1) if bias_mode in {"tf", "both"} else None
+
+    def forward(self, dna: torch.Tensor, tf: torch.Tensor) -> torch.Tensor:
+        dna_pair = self.dna_projection(dna)
+        tf_pair = self.tf_projection(tf)
+        batch_size, length, _ = dna_pair.shape
+        n_tfs = tf_pair.shape[0]
+
+        dna_expanded = dna_pair.unsqueeze(1).expand(-1, n_tfs, -1, -1)
+        tf_expanded = tf_pair.unsqueeze(0).unsqueeze(2).expand(batch_size, -1, length, -1)
+        pair_features = torch.cat(
+            [
+                dna_expanded,
+                tf_expanded,
+                dna_expanded * tf_expanded,
+            ],
+            dim=-1,
+        )
+        logits = self.mlp(pair_features).squeeze(-1)
+
+        if self.dna_bias is not None:
+            logits = logits + self.dna_bias(dna).squeeze(-1).unsqueeze(1)
+        if self.tf_bias is not None:
+            logits = logits + self.tf_bias(tf).view(1, -1, 1)
+        return logits
+
+
+class DenseProteinLocalAttention(nn.Module):
+    """Dense protein-conditioned scorer with local DNA self-attention.
+
+    DNA positions first exchange information within a configurable local window.
+    The resulting task-adapted DNA vectors are scored against adapted
+    mean-pooled TF protein embeddings using either a multi-head bilinear scorer
+    or a small interaction MLP.
+    """
+
+    supports_tf_indices = True
+
+    def __init__(
+        self,
+        n_tfs: int,
+        tf_embeddings: torch.Tensor,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 128,
+        dropout: float = 0.1,
+        tf_embedding_dropout: float = 0.0,
+        dna_attention_window_bp: int = 50,
+        dna_attention_layers: int = 2,
+        dna_attention_heads: int = 8,
+        dna_attention_ffn_multiplier: float = 4.0,
+        protein_noise_std: float = 0.0,
+        protein_l2_normalize: bool = False,
+        scorer: str = "multihead_bilinear",
+        scorer_heads: int = 8,
+        scorer_pair_dim: int = 32,
+        scorer_hidden_dim: int = 128,
+        scorer_bias_mode: str = "tf",
+    ) -> None:
+        super().__init__()
+        if tf_embeddings.ndim != 2:
+            raise ValueError("tf_embeddings must have shape [n_tfs, embedding_dim]")
+        if tf_embeddings.shape[0] != n_tfs:
+            raise ValueError(
+                f"Expected {n_tfs} TF embeddings, got {tf_embeddings.shape[0]}"
+            )
+        if not 0.0 <= tf_embedding_dropout < 1.0:
+            raise ValueError("tf_embedding_dropout must be in [0, 1)")
+        if dna_attention_layers <= 0:
+            raise ValueError("dna_attention_layers must be positive")
+        if protein_noise_std < 0.0:
+            raise ValueError("protein_noise_std must be non-negative")
+        if scorer not in {"multihead_bilinear", "mlp"}:
+            raise ValueError("scorer must be 'multihead_bilinear' or 'mlp'")
+
+        self.register_buffer("tf_embeddings", tf_embeddings.float())
+        self.tf_embedding_dropout = float(tf_embedding_dropout)
+        self.protein_noise_std = float(protein_noise_std)
+        self.protein_l2_normalize = bool(protein_l2_normalize)
+
+        embedding_dim = int(tf_embeddings.shape[1])
+        self.input_projection = nn.Sequential(
+            nn.Conv1d(input_channels, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.dna_attention = nn.ModuleList(
+            [
+                LocalSelfAttentionBlock(
+                    hidden_channels,
+                    num_heads=dna_attention_heads,
+                    window_bp=dna_attention_window_bp,
+                    ffn_multiplier=dna_attention_ffn_multiplier,
+                    dropout=dropout,
+                )
+                for _ in range(dna_attention_layers)
+            ]
+        )
+        self.dna_adapter = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+        )
+        self.protein_adapter = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+        )
+
+        if scorer == "multihead_bilinear":
+            self.scorer = MultiHeadBilinearScorer(
+                hidden_channels,
+                num_heads=scorer_heads,
+                head_dim=scorer_pair_dim,
+                dropout=dropout,
+                bias_mode=scorer_bias_mode,
+            )
+        else:
+            self.scorer = MLPInteractionScorer(
+                hidden_channels,
+                pair_dim=scorer_pair_dim,
+                scorer_hidden_dim=scorer_hidden_dim,
+                dropout=dropout,
+                bias_mode=scorer_bias_mode,
+            )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        tf_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        dna = self.input_projection(x).transpose(1, 2)
+        for block in self.dna_attention:
+            dna = block(dna)
+        dna = self.dna_adapter(dna)
+
+        tf_embeddings = self.tf_embeddings
+        if tf_indices is not None:
+            tf_embeddings = tf_embeddings.index_select(0, tf_indices)
+        if self.training and self.tf_embedding_dropout > 0.0:
+            tf_embeddings = F.dropout(
+                tf_embeddings,
+                p=self.tf_embedding_dropout,
+                training=True,
+            )
+        if self.training and self.protein_noise_std > 0.0:
+            tf_embeddings = tf_embeddings + torch.randn_like(tf_embeddings) * self.protein_noise_std
+        tf_features = self.protein_adapter(tf_embeddings)
+        if self.protein_l2_normalize:
+            tf_features = F.normalize(tf_features, p=2, dim=-1)
+
+        return self.scorer(dna, tf_features)
+
+
+def _split_channels(total_channels: int, n_parts: int) -> list[int]:
+    if total_channels <= 0:
+        raise ValueError("total_channels must be positive")
+    if n_parts <= 0:
+        raise ValueError("n_parts must be positive")
+    if total_channels < n_parts:
+        raise ValueError("total_channels must be at least the number of parts")
+    base = total_channels // n_parts
+    remainder = total_channels % n_parts
+    return [base + (1 if idx < remainder else 0) for idx in range(n_parts)]
+
+
+class DenseProteinMotifCNN(nn.Module):
+    """Protein-conditioned dense scorer with an explicit motif-CNN DNA stem.
+
+    The DNA encoder starts with several odd-width convolutions over the raw
+    sequence to expose reusable motif-like channels, then adds residual dilated
+    context. The scoring path is shared with ``DenseProteinLocalAttention`` so
+    the main ablation is DNA encoding rather than the protein/interaction head.
+    """
+
+    supports_tf_indices = True
+
+    def __init__(
+        self,
+        n_tfs: int,
+        tf_embeddings: torch.Tensor,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 128,
+        motif_kernel_sizes: tuple[int, ...] = (7, 11, 15),
+        kernel_size: int = 7,
+        dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+        dropout: float = 0.1,
+        tf_embedding_dropout: float = 0.0,
+        protein_noise_std: float = 0.0,
+        protein_l2_normalize: bool = False,
+        scorer: str = "multihead_bilinear",
+        scorer_heads: int = 8,
+        scorer_pair_dim: int = 32,
+        scorer_hidden_dim: int = 128,
+        scorer_bias_mode: str = "tf",
+    ) -> None:
+        super().__init__()
+        if tf_embeddings.ndim != 2:
+            raise ValueError("tf_embeddings must have shape [n_tfs, embedding_dim]")
+        if tf_embeddings.shape[0] != n_tfs:
+            raise ValueError(
+                f"Expected {n_tfs} TF embeddings, got {tf_embeddings.shape[0]}"
+            )
+        if not motif_kernel_sizes:
+            raise ValueError("motif_kernel_sizes must not be empty")
+        if any(size <= 0 or size % 2 == 0 for size in motif_kernel_sizes):
+            raise ValueError("motif_kernel_sizes must contain positive odd integers")
+        if not 0.0 <= tf_embedding_dropout < 1.0:
+            raise ValueError("tf_embedding_dropout must be in [0, 1)")
+        if protein_noise_std < 0.0:
+            raise ValueError("protein_noise_std must be non-negative")
+        if scorer not in {"multihead_bilinear", "mlp"}:
+            raise ValueError("scorer must be 'multihead_bilinear' or 'mlp'")
+
+        self.register_buffer("tf_embeddings", tf_embeddings.float())
+        self.tf_embedding_dropout = float(tf_embedding_dropout)
+        self.protein_noise_std = float(protein_noise_std)
+        self.protein_l2_normalize = bool(protein_l2_normalize)
+
+        stem_channels = _split_channels(hidden_channels, len(motif_kernel_sizes))
+        self.motif_stem = nn.ModuleList(
+            [
+                nn.Conv1d(
+                    input_channels,
+                    out_channels,
+                    kernel_size=motif_kernel,
+                    padding=motif_kernel // 2,
+                )
+                for out_channels, motif_kernel in zip(stem_channels, motif_kernel_sizes)
+            ]
+        )
+        self.stem_norm = nn.BatchNorm1d(hidden_channels)
+        self.stem_activation = nn.GELU()
+        self.stem_dropout = nn.Dropout(dropout)
+        self.context_blocks = nn.ModuleList(
+            [
+                ResidualDilatedBlock(
+                    hidden_channels,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    dropout=dropout,
+                )
+                for dilation in dilations
+            ]
+        )
+        self.dna_adapter = nn.Sequential(
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_channels, hidden_channels, kernel_size=1),
+        )
+
+        embedding_dim = int(tf_embeddings.shape[1])
+        self.protein_adapter = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+        )
+        if scorer == "multihead_bilinear":
+            self.scorer = MultiHeadBilinearScorer(
+                hidden_channels,
+                num_heads=scorer_heads,
+                head_dim=scorer_pair_dim,
+                dropout=dropout,
+                bias_mode=scorer_bias_mode,
+            )
+        else:
+            self.scorer = MLPInteractionScorer(
+                hidden_channels,
+                pair_dim=scorer_pair_dim,
+                scorer_hidden_dim=scorer_hidden_dim,
+                dropout=dropout,
+                bias_mode=scorer_bias_mode,
+            )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        tf_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        dna = torch.cat([conv(x) for conv in self.motif_stem], dim=1)
+        dna = self.stem_dropout(self.stem_activation(self.stem_norm(dna)))
+        for block in self.context_blocks:
+            dna = block(dna)
+        dna = self.dna_adapter(dna).transpose(1, 2)
+
+        tf_embeddings = self.tf_embeddings
+        if tf_indices is not None:
+            tf_embeddings = tf_embeddings.index_select(0, tf_indices)
+        if self.training and self.tf_embedding_dropout > 0.0:
+            tf_embeddings = F.dropout(
+                tf_embeddings,
+                p=self.tf_embedding_dropout,
+                training=True,
+            )
+        if self.training and self.protein_noise_std > 0.0:
+            tf_embeddings = tf_embeddings + torch.randn_like(tf_embeddings) * self.protein_noise_std
+        tf_features = self.protein_adapter(tf_embeddings)
+        if self.protein_l2_normalize:
+            tf_features = F.normalize(tf_features, p=2, dim=-1)
+
+        return self.scorer(dna, tf_features)
+
+
 class DenseProteinResDilatedCrossAttention(nn.Module):
     """Protein-conditioned dense scorer with a local CNN path plus attention.
 
@@ -574,6 +1043,8 @@ class TransBindLite(nn.Module):
     embedding acts as a query over those positions, yielding one logit per TF.
     """
 
+    supports_tf_indices = True
+
     def __init__(
         self,
         n_tfs: int,
@@ -637,11 +1108,19 @@ class TransBindLite(nn.Module):
         )
         self.tf_bias = nn.Parameter(torch.zeros(n_tfs)) if learned_tf_bias else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        tf_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         dna = self.dna_encoder(x).transpose(1, 2)
         global_dna = dna.mean(dim=1)
 
-        tf_query = self.tf_projection(self.tf_embeddings)
+        tf_embeddings = self.tf_embeddings
+        if tf_indices is not None:
+            tf_embeddings = tf_embeddings.index_select(0, tf_indices)
+        tf_query = self.tf_projection(tf_embeddings)
         tf_query = tf_query.unsqueeze(0).expand(x.shape[0], -1, -1)
         attended, _ = self.cross_attention(query=tf_query, key=dna, value=dna, need_weights=False)
         attended = self.norm(attended + tf_query)
@@ -649,7 +1128,10 @@ class TransBindLite(nn.Module):
         global_dna = global_dna.unsqueeze(1).expand(-1, attended.shape[1], -1)
         logits = self.classifier(torch.cat([attended, global_dna], dim=-1)).squeeze(-1)
         if self.tf_bias is not None:
-            logits = logits + self.tf_bias
+            tf_bias = self.tf_bias
+            if tf_indices is not None:
+                tf_bias = tf_bias.index_select(0, tf_indices)
+            logits = logits + tf_bias
         return logits
 
 
@@ -658,6 +1140,8 @@ DENSE_MODEL_NAMES = (
     "dense_small_cnn",
     "dense_res_dilated_cnn",
     "dense_protein_res_dilated_cnn",
+    "dense_protein_local_attention",
+    "dense_protein_motif_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )
@@ -675,6 +1159,11 @@ def parse_dilations(value: str | tuple[int, ...] | list[int]) -> tuple[int, ...]
     if any(dilation <= 0 for dilation in dilations):
         raise ValueError("Dilations must be positive integers")
     return dilations
+
+
+def parse_int_tuple(value: str | tuple[int, ...] | list[int]) -> tuple[int, ...]:
+    values = parse_dilations(value)
+    return values
 
 
 def build_model(
@@ -731,6 +1220,18 @@ def build_dense_model(
     tf_embedding_dropout: float = 0.0,
     cross_attention_gate_logit_init: float = -3.0,
     cross_attention_context_pool_sizes: tuple[int, ...] = (4,),
+    dna_attention_window_bp: int = 50,
+    dna_attention_layers: int = 2,
+    dna_attention_heads: int = 8,
+    dna_attention_ffn_multiplier: float = 4.0,
+    motif_kernel_sizes: tuple[int, ...] = (7, 11, 15),
+    protein_noise_std: float = 0.0,
+    protein_l2_normalize: bool = False,
+    scorer: str = "multihead_bilinear",
+    scorer_heads: int = 8,
+    scorer_pair_dim: int = 32,
+    scorer_hidden_dim: int = 128,
+    scorer_bias_mode: str = "tf",
 ) -> nn.Module:
     if model_name == "dense_small_cnn":
         return DenseSmallCNN(
@@ -759,6 +1260,49 @@ def build_dense_model(
             kernel_size=kernel_size,
             dropout=dropout,
             dilations=dilations,
+        )
+    if model_name == "dense_protein_local_attention":
+        if tf_embeddings is None:
+            raise ValueError("dense_protein_local_attention requires tf_embeddings")
+        return DenseProteinLocalAttention(
+            n_tfs=n_tfs,
+            tf_embeddings=tf_embeddings,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            dropout=dropout,
+            tf_embedding_dropout=tf_embedding_dropout,
+            dna_attention_window_bp=dna_attention_window_bp,
+            dna_attention_layers=dna_attention_layers,
+            dna_attention_heads=dna_attention_heads,
+            dna_attention_ffn_multiplier=dna_attention_ffn_multiplier,
+            protein_noise_std=protein_noise_std,
+            protein_l2_normalize=protein_l2_normalize,
+            scorer=scorer,
+            scorer_heads=scorer_heads,
+            scorer_pair_dim=scorer_pair_dim,
+            scorer_hidden_dim=scorer_hidden_dim,
+            scorer_bias_mode=scorer_bias_mode,
+        )
+    if model_name == "dense_protein_motif_cnn":
+        if tf_embeddings is None:
+            raise ValueError("dense_protein_motif_cnn requires tf_embeddings")
+        return DenseProteinMotifCNN(
+            n_tfs=n_tfs,
+            tf_embeddings=tf_embeddings,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            motif_kernel_sizes=motif_kernel_sizes,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            dilations=dilations,
+            tf_embedding_dropout=tf_embedding_dropout,
+            protein_noise_std=protein_noise_std,
+            protein_l2_normalize=protein_l2_normalize,
+            scorer=scorer,
+            scorer_heads=scorer_heads,
+            scorer_pair_dim=scorer_pair_dim,
+            scorer_hidden_dim=scorer_hidden_dim,
+            scorer_bias_mode=scorer_bias_mode,
         )
     if model_name == "dense_protein_res_dilated_crossattention":
         if tf_embeddings is None:
