@@ -257,6 +257,35 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--label-mode",
+        choices=LABEL_MODES,
+        default="tf",
+        help=(
+            "Use per-TF dense labels, or collapse labels into one DNA-only "
+            "channel using training TFs only."
+        ),
+    )
+    parser.add_argument(
+        "--loss",
+        choices=LOSS_NAMES,
+        default="bce",
+        help="Dense training loss.",
+    )
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=2.0,
+        help="Focusing exponent for --loss focal.",
+    )
+    parser.add_argument(
+        "--focal-alpha",
+        type=float,
+        help=(
+            "Optional focal alpha for positives. Leave unset to use only "
+            "--pos-weight with focal modulation."
+        ),
+    )
+    parser.add_argument(
         "--dna-attention-window-bp",
         type=int,
         default=50,
@@ -1081,17 +1110,39 @@ def train_one_epoch(
         mask = batch["mask"].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        logits = forward_dense_model(model, x, tf_indices)
-        y = select_tf_axis(y, tf_indices)
-        hard_y = select_tf_axis(hard_y, tf_indices)
-        batch_pos_weight = select_tf_axis(pos_weight, tf_indices) if pos_weight is not None else None
+        logits = forward_dense_model(model, x, model_tf_indices)
+        y = make_dense_targets(
+            y,
+            label_mode=label_mode,
+            model_tf_indices=model_tf_indices,
+            merge_tf_indices=merge_tf_indices,
+        )
+        hard_y = make_dense_targets(
+            hard_y,
+            label_mode=label_mode,
+            model_tf_indices=model_tf_indices,
+            merge_tf_indices=merge_tf_indices,
+        )
+        batch_pos_weight = (
+            select_tf_axis(pos_weight, model_tf_indices)
+            if pos_weight is not None and label_mode == "tf"
+            else pos_weight
+        )
         if logits.shape != y.shape:
             raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
         if logits.shape != hard_y.shape:
             raise ValueError(
                 f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
             )
-        loss = dense_bce_loss(logits, y, mask, batch_pos_weight)
+        loss = dense_loss(
+            logits,
+            y,
+            mask,
+            batch_pos_weight,
+            loss_name=loss_name,
+            focal_gamma=focal_gamma,
+            focal_alpha=focal_alpha,
+        )
         loss.backward()
         optimizer.step()
 
@@ -1170,9 +1221,19 @@ def evaluate_dense(
             hard_y = batch["hard_y"].to(device, non_blocking=True)
             mask = batch["mask"].to(device, non_blocking=True)
 
-            logits = forward_dense_model(model, x, tf_indices)
-            y = select_tf_axis(y, tf_indices)
-            hard_y = select_tf_axis(hard_y, tf_indices)
+            logits = forward_dense_model(model, x, model_tf_indices)
+            y = make_dense_targets(
+                y,
+                label_mode=label_mode,
+                model_tf_indices=model_tf_indices,
+                merge_tf_indices=merge_tf_indices,
+            )
+            hard_y = make_dense_targets(
+                hard_y,
+                label_mode=label_mode,
+                model_tf_indices=model_tf_indices,
+                merge_tf_indices=merge_tf_indices,
+            )
             batch_pos_weight = (
                 select_tf_axis(pos_weight, model_tf_indices)
                 if pos_weight is not None and label_mode == "tf"
@@ -1186,7 +1247,15 @@ def evaluate_dense(
                 raise ValueError(
                     f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
                 )
-            loss = dense_bce_loss(logits, y, mask, batch_pos_weight)
+            loss = dense_loss(
+                logits,
+                y,
+                mask,
+                batch_pos_weight,
+                loss_name=loss_name,
+                focal_gamma=focal_gamma,
+                focal_alpha=focal_alpha,
+            )
 
             batch_size = x.shape[0]
             total_loss += float(loss.detach().cpu()) * batch_size

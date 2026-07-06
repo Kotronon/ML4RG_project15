@@ -52,6 +52,10 @@ DROPOUT="${DROPOUT:-0.1}"
 TF_EMBEDDING_DROPOUT="${TF_EMBEDDING_DROPOUT:-0.0}"
 CROSS_ATTENTION_GATE_LOGIT_INIT="${CROSS_ATTENTION_GATE_LOGIT_INIT:--3.0}"
 CROSS_ATTENTION_CONTEXT_POOL_SIZES="${CROSS_ATTENTION_CONTEXT_POOL_SIZES:-4}"
+LABEL_MODE="${LABEL_MODE:-tf}"
+LOSS="${LOSS:-bce}"
+FOCAL_GAMMA="${FOCAL_GAMMA:-2.0}"
+FOCAL_ALPHA="${FOCAL_ALPHA:-}"
 
 DNA_ATTENTION_WINDOW_BP="${DNA_ATTENTION_WINDOW_BP:-50}"
 DNA_ATTENTION_LAYERS="${DNA_ATTENTION_LAYERS:-2}"
@@ -142,6 +146,10 @@ echo "Dropout:              ${DROPOUT}"
 echo "TF emb dropout:       ${TF_EMBEDDING_DROPOUT}"
 echo "CrossAttn gate init:  ${CROSS_ATTENTION_GATE_LOGIT_INIT}"
 echo "CrossAttn pools:      ${CROSS_ATTENTION_CONTEXT_POOL_SIZES}"
+echo "Label mode:           ${LABEL_MODE}"
+echo "Loss:                 ${LOSS}"
+echo "Focal gamma:          ${FOCAL_GAMMA}"
+echo "Focal alpha:          ${FOCAL_ALPHA:-<none>}"
 
 echo "DNA attn window bp:   ${DNA_ATTENTION_WINDOW_BP}"
 echo "DNA attn layers:      ${DNA_ATTENTION_LAYERS}"
@@ -238,9 +246,11 @@ fi
 if [[ -n "${LABEL_SMOOTHING_SIGMA_BP}" ]]; then
     OPTIONAL_ARGS+=(--label-smoothing-sigma-bp "${LABEL_SMOOTHING_SIGMA_BP}")
 fi
+if [[ -n "${FOCAL_ALPHA}" ]]; then
+    OPTIONAL_ARGS+=(--focal-alpha "${FOCAL_ALPHA}")
+fi
 if [[ "${PROTEIN_L2_NORMALIZE}" == "true" ]]; then
     OPTIONAL_ARGS+=(--protein-l2-normalize)
-
 fi
 
 "${PYTHON_BIN}" "${TRAIN_SCRIPT}" \
@@ -260,6 +270,9 @@ fi
     --tf-embedding-dropout "${TF_EMBEDDING_DROPOUT}" \
     --cross-attention-gate-logit-init "${CROSS_ATTENTION_GATE_LOGIT_INIT}" \
     --cross-attention-context-pool-sizes "${CROSS_ATTENTION_CONTEXT_POOL_SIZES}" \
+    --label-mode "${LABEL_MODE}" \
+    --loss "${LOSS}" \
+    --focal-gamma "${FOCAL_GAMMA}" \
     --dna-attention-window-bp "${DNA_ATTENTION_WINDOW_BP}" \
     --dna-attention-layers "${DNA_ATTENTION_LAYERS}" \
     --dna-attention-heads "${DNA_ATTENTION_HEADS}" \
