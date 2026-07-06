@@ -10,10 +10,12 @@ ESMDBP="${TF_EMBEDDINGS_PATH:-${PROJECT}/working/protein_embeddings/scer_esmdbp_
 TF_KEY_COLUMN="${TF_EMBEDDING_KEY_COLUMN:-gene}"
 
 # Use an existing split when provided. Otherwise make a named-similarity split
-# around the supervisor-suggested easy/recoverable TFs.
+# around supervisor-suggested easy/recoverable TFs that are present in the
+# current S. cerevisiae BindingBench validation table. RAP1/REB1 are not always
+# present in this table after filtering, so keep them opt-in via TF_VAL_NAMES.
 COMMON_TF_SPLIT_PATH="${TF_SPLIT_PATH:-}"
 COMMON_TF_SPLIT_MODE="${TF_SPLIT_MODE:-named_similarity}"
-COMMON_TF_VAL_NAMES="${TF_VAL_NAMES:-rap1,reb1}"
+COMMON_TF_VAL_NAMES="${TF_VAL_NAMES:-}"
 COMMON_TF_TEST_NAMES="${TF_TEST_NAMES:-abf1,cbf1}"
 COMMON_TF_SIMILARITY_THRESHOLD="${TF_SIMILARITY_THRESHOLD:-0.90}"
 
