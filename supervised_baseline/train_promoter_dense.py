@@ -1188,6 +1188,7 @@ def evaluate_dense(
     focal_gamma: float,
     focal_alpha: float | None,
     tf_names: list[str] | None = None,
+    merged_label_name: str = "merged_train_tfs",
 ) -> DenseSplitStats:
     model.eval()
     total_loss = 0.0
@@ -1203,7 +1204,7 @@ def evaluate_dense(
 
     if tf_names is not None:
         if label_mode == "merged_train_tfs":
-            selected_tf_names = ["merged_train_tfs"]
+            selected_tf_names = [merged_label_name]
         elif model_tf_indices is None:
             selected_tf_names = [str(name) for name in tf_names]
         else:
@@ -1525,6 +1526,7 @@ def main() -> None:
     validation_loader = val_loader
     validation_model_tf_tensor = val_tf_tensor if use_tf_holdout and args.label_mode == "tf" else None
     validation_merge_tf_tensor = train_tf_tensor if args.label_mode == "merged_train_tfs" else None
+    validation_merged_label_name = "merged_train_tfs"
     validation_description = "validation promoters"
     if use_tf_holdout and args.label_mode == "tf":
         if validation_model_tf_tensor is not None and validation_loader is None:
@@ -1532,6 +1534,19 @@ def main() -> None:
             validation_description = "train promoters with held-out validation TFs"
         elif validation_model_tf_tensor is not None:
             validation_description = "validation promoters with held-out validation TFs"
+    elif use_tf_holdout and args.label_mode == "merged_train_tfs":
+        if val_tf_tensor is not None:
+            validation_merge_tf_tensor = val_tf_tensor
+            validation_merged_label_name = "merged_val_tfs"
+            if validation_loader is None:
+                validation_loader = train_eval_loader
+                validation_description = (
+                    "train promoters with held-out validation TF union"
+                )
+            else:
+                validation_description = (
+                    "validation promoters with held-out validation TF union"
+                )
 
     use_val_for_selection = (
         validation_loader is not None
@@ -1585,6 +1600,7 @@ def main() -> None:
                     focal_gamma=args.focal_gamma,
                     focal_alpha=args.focal_alpha,
                     tf_names=dataset.tf_names,
+                    merged_label_name=validation_merged_label_name,
                 ),
             )
 
@@ -1685,27 +1701,128 @@ def main() -> None:
     }
     if use_tf_holdout and args.label_mode == "tf":
         final_jobs = {
-            "train_promoters_train_tfs": (train_eval_loader, train_tf_tensor),
-            "test_promoters_train_tfs": (test_loader, train_tf_tensor),
+            "train_promoters_train_tfs": (
+                train_eval_loader,
+                train_tf_tensor,
+                None,
+                "train_tfs",
+            ),
+            "test_promoters_train_tfs": (
+                test_loader,
+                train_tf_tensor,
+                None,
+                "train_tfs",
+            ),
         }
         if val_tf_tensor is not None:
-            final_jobs["train_promoters_val_tfs"] = (train_eval_loader, val_tf_tensor)
-            final_jobs["val_promoters_val_tfs"] = (val_loader, val_tf_tensor)
+            final_jobs["train_promoters_val_tfs"] = (
+                train_eval_loader,
+                val_tf_tensor,
+                None,
+                "val_tfs",
+            )
+            final_jobs["val_promoters_val_tfs"] = (
+                val_loader,
+                val_tf_tensor,
+                None,
+                "val_tfs",
+            )
         if test_tf_tensor is not None:
-            final_jobs["train_promoters_test_tfs"] = (train_eval_loader, test_tf_tensor)
-            final_jobs["test_promoters_test_tfs"] = (test_loader, test_tf_tensor)
+            final_jobs["train_promoters_test_tfs"] = (
+                train_eval_loader,
+                test_tf_tensor,
+                None,
+                "test_tfs",
+            )
+            final_jobs["test_promoters_test_tfs"] = (
+                test_loader,
+                test_tf_tensor,
+                None,
+                "test_tfs",
+            )
         eval_pos_weight = None
+    elif use_tf_holdout and args.label_mode == "merged_train_tfs":
+        final_jobs = {
+            "train_promoters_train_tfs": (
+                train_eval_loader,
+                None,
+                train_tf_tensor,
+                "merged_train_tfs",
+            ),
+            "val_promoters_train_tfs": (
+                val_loader,
+                None,
+                train_tf_tensor,
+                "merged_train_tfs",
+            ),
+            "test_promoters_train_tfs": (
+                test_loader,
+                None,
+                train_tf_tensor,
+                "merged_train_tfs",
+            ),
+        }
+        if val_tf_tensor is not None:
+            final_jobs["train_promoters_val_tfs"] = (
+                train_eval_loader,
+                None,
+                val_tf_tensor,
+                "merged_val_tfs",
+            )
+            final_jobs["val_promoters_val_tfs"] = (
+                val_loader,
+                None,
+                val_tf_tensor,
+                "merged_val_tfs",
+            )
+            final_jobs["test_promoters_val_tfs"] = (
+                test_loader,
+                None,
+                val_tf_tensor,
+                "merged_val_tfs",
+            )
+        if test_tf_tensor is not None:
+            final_jobs["train_promoters_test_tfs"] = (
+                train_eval_loader,
+                None,
+                test_tf_tensor,
+                "merged_test_tfs",
+            )
+            final_jobs["val_promoters_test_tfs"] = (
+                val_loader,
+                None,
+                test_tf_tensor,
+                "merged_test_tfs",
+            )
+            final_jobs["test_promoters_test_tfs"] = (
+                test_loader,
+                None,
+                test_tf_tensor,
+                "merged_test_tfs",
+            )
+        eval_pos_weight = pos_weight
     else:
         final_jobs = {
-            "train": (train_eval_loader, None),
-            "val": (val_loader, None),
-            "test": (test_loader, None),
+            "train": (train_eval_loader, None, None, "merged_train_tfs"),
+            "val": (val_loader, None, None, "merged_train_tfs"),
+            "test": (test_loader, None, None, "merged_train_tfs"),
         }
         eval_pos_weight = pos_weight
-    for split_name, (split_loader, split_tf_tensor) in final_jobs.items():
+    for split_name, (
+        split_loader,
+        split_tf_tensor,
+        split_merge_tf_tensor,
+        merged_label_name,
+    ) in final_jobs.items():
         if split_loader is None:
             continue
         if use_tf_holdout and args.label_mode == "tf" and split_tf_tensor is None:
+            continue
+        if (
+            use_tf_holdout
+            and args.label_mode == "merged_train_tfs"
+            and split_merge_tf_tensor is None
+        ):
             continue
         split_stats = evaluate_dense(
             model=model,
@@ -1714,12 +1831,17 @@ def main() -> None:
             input_mode=args.input_mode,
             pos_weight=eval_pos_weight,
             model_tf_indices=split_tf_tensor if args.label_mode == "tf" else None,
-            merge_tf_indices=train_tf_tensor if args.label_mode == "merged_train_tfs" else None,
+            merge_tf_indices=(
+                split_merge_tf_tensor
+                if args.label_mode == "merged_train_tfs"
+                else None
+            ),
             label_mode=args.label_mode,
             loss_name=args.loss,
             focal_gamma=args.focal_gamma,
             focal_alpha=args.focal_alpha,
             tf_names=dataset.tf_names,
+            merged_label_name=merged_label_name,
         )
         final_metrics[split_name] = asdict(split_stats)
     save_json(args.output_dir / "final_metrics.json", final_metrics)
