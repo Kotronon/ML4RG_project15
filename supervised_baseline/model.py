@@ -385,6 +385,34 @@ class MultiHeadBilinearScorer(nn.Module):
             logits = logits + self.tf_bias(tf).view(1, -1, 1)
         return logits
 
+    def forward_pairwise(self, dna: torch.Tensor, tf: torch.Tensor) -> torch.Tensor:
+        batch_size, length, _ = dna.shape
+        if tf.ndim != 2 or tf.shape[0] != batch_size:
+            raise ValueError(
+                "Pairwise TF features must have shape [batch, hidden_channels]"
+            )
+
+        dna_heads = self.dna_projection(self.dropout(dna)).view(
+            batch_size,
+            length,
+            self.num_heads,
+            self.head_dim,
+        )
+        tf_heads = self.tf_projection(self.dropout(tf)).view(
+            batch_size,
+            self.num_heads,
+            self.head_dim,
+        )
+        head_weights = torch.softmax(self.head_weights, dim=0)
+        logits = torch.einsum("blhd,bhd,h->bl", dna_heads, tf_heads, head_weights)
+        logits = logits * self.score_scale
+
+        if self.dna_bias is not None:
+            logits = logits + self.dna_bias(dna).squeeze(-1)
+        if self.tf_bias is not None:
+            logits = logits + self.tf_bias(tf)
+        return logits.unsqueeze(1)
+
 
 class MLPInteractionScorer(nn.Module):
     """Small interaction MLP over DNA/TF pair features."""
@@ -1152,6 +1180,7 @@ class DenseProteinResidualBilinearCNN(nn.Module):
     """
 
     supports_tf_indices = True
+    supports_pairwise_tf_indices = True
 
     def __init__(
         self,
@@ -1244,12 +1273,19 @@ class DenseProteinResidualBilinearCNN(nn.Module):
         x: torch.Tensor,
         *,
         tf_indices: torch.Tensor | None = None,
+        pairwise_tf_indices: bool = False,
     ) -> torch.Tensor:
         dna_features = self.dna_model.encode(x)
         dna_prior = self.dna_model.score_features(dna_features)
 
         tf_embeddings = self.tf_embeddings
         if tf_indices is not None:
+            if pairwise_tf_indices and (
+                tf_indices.ndim != 1 or tf_indices.shape[0] != x.shape[0]
+            ):
+                raise ValueError(
+                    "pairwise_tf_indices=True requires tf_indices with shape [batch]"
+                )
             tf_embeddings = tf_embeddings.index_select(0, tf_indices)
         if self.training and self.tf_embedding_dropout > 0.0:
             tf_embeddings = F.dropout(
@@ -1263,7 +1299,13 @@ class DenseProteinResidualBilinearCNN(nn.Module):
         if self.protein_l2_normalize:
             protein_features = F.normalize(protein_features, p=2, dim=-1)
 
-        residual = self.residual_scorer(dna_features, protein_features)
+        if pairwise_tf_indices:
+            residual = self.residual_scorer.forward_pairwise(
+                dna_features,
+                protein_features,
+            )
+        else:
+            residual = self.residual_scorer(dna_features, protein_features)
         residual_scale = torch.sigmoid(self.protein_delta_gate_logit)
         return dna_prior + residual_scale * residual
 

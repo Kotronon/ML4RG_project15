@@ -16,6 +16,7 @@ try:
     from .dataset import (
         BindingBenchPromoterEmbeddingDataset,
         BindingBenchPromoterSequenceDataset,
+        BindingBenchSampledPromoterWindowDataset,
         DEFAULT_REGIONS_PATH,
         DEFAULT_SITES_PATH,
     )
@@ -45,6 +46,7 @@ except ImportError:
     from dataset import (
         BindingBenchPromoterEmbeddingDataset,
         BindingBenchPromoterSequenceDataset,
+        BindingBenchSampledPromoterWindowDataset,
         DEFAULT_REGIONS_PATH,
         DEFAULT_SITES_PATH,
     )
@@ -119,6 +121,7 @@ class DenseSplitStats:
 
 LABEL_MODES = ("tf", "merged_train_tfs")
 LOSS_NAMES = ("bce", "focal")
+TRAINING_WINDOW_MODES = ("full_promoter", "sampled_windows")
 
 
 def parse_args() -> argparse.Namespace:
@@ -285,6 +288,60 @@ def parse_args() -> argparse.Namespace:
             "Optional focal alpha for positives. Leave unset to use only "
             "--pos-weight with focal modulation."
         ),
+    )
+    parser.add_argument(
+        "--training-window-mode",
+        choices=TRAINING_WINDOW_MODES,
+        default="full_promoter",
+        help=(
+            "Use full promoters for training, or sample TF-conditioned windows "
+            "while keeping full-promoter validation/test evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--sampled-window-size",
+        type=int,
+        default=200,
+        help="Window length for --training-window-mode sampled_windows.",
+    )
+    parser.add_argument(
+        "--sampled-window-samples-per-epoch",
+        type=int,
+        default=50_000,
+        help="Number of sampled TF-window pairs per training epoch.",
+    )
+    parser.add_argument(
+        "--sampled-window-positive-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of sampled windows anchored on the target TF's sites.",
+    )
+    parser.add_argument(
+        "--sampled-window-hard-negative-fraction",
+        type=float,
+        default=0.25,
+        help=(
+            "Fraction of sampled windows containing another sampled TF's site "
+            "but no target-TF site."
+        ),
+    )
+    parser.add_argument(
+        "--sampled-window-margin-bp",
+        type=int,
+        default=30,
+        help="Minimum preferred distance between positive anchor and window edge.",
+    )
+    parser.add_argument(
+        "--sampled-window-negative-exclusion-bp",
+        type=int,
+        default=10,
+        help="Buffer around target-TF sites rejected for negative windows.",
+    )
+    parser.add_argument(
+        "--sampled-window-max-attempts",
+        type=int,
+        default=100,
+        help="Maximum rejection-sampling attempts per sampled window.",
     )
     parser.add_argument(
         "--dna-attention-window-bp",
@@ -528,6 +585,30 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--focal-gamma must be non-negative")
     if args.focal_alpha is not None and not 0.0 <= args.focal_alpha <= 1.0:
         raise ValueError("--focal-alpha must be between 0 and 1")
+    if args.training_window_mode == "sampled_windows" and args.label_mode != "tf":
+        raise ValueError("--training-window-mode sampled_windows requires --label-mode tf")
+    if args.sampled_window_size <= 0:
+        raise ValueError("--sampled-window-size must be positive")
+    if args.sampled_window_samples_per_epoch <= 0:
+        raise ValueError("--sampled-window-samples-per-epoch must be positive")
+    if not 0.0 <= args.sampled_window_positive_fraction <= 1.0:
+        raise ValueError("--sampled-window-positive-fraction must be in [0, 1]")
+    if not 0.0 <= args.sampled_window_hard_negative_fraction <= 1.0:
+        raise ValueError("--sampled-window-hard-negative-fraction must be in [0, 1]")
+    if (
+        args.sampled_window_positive_fraction
+        + args.sampled_window_hard_negative_fraction
+        > 1.0
+    ):
+        raise ValueError("sampled positive and hard-negative fractions must sum to <= 1")
+    if args.sampled_window_margin_bp < 0:
+        raise ValueError("--sampled-window-margin-bp must be non-negative")
+    if args.sampled_window_margin_bp * 2 >= args.sampled_window_size:
+        raise ValueError("--sampled-window-margin-bp must leave room inside the window")
+    if args.sampled_window_negative_exclusion_bp < 0:
+        raise ValueError("--sampled-window-negative-exclusion-bp must be non-negative")
+    if args.sampled_window_max_attempts <= 0:
+        raise ValueError("--sampled-window-max-attempts must be positive")
     if args.label_mode != "tf" and args.model in PROTEIN_DENSE_MODEL_NAMES:
         raise ValueError("--label-mode merged_train_tfs is intended for DNA-only models")
     if args.freeze_dna_branch and args.pretrained_dna_checkpoint is None:
@@ -742,7 +823,22 @@ def forward_dense_model(
     model: torch.nn.Module,
     x: torch.Tensor,
     tf_indices: torch.Tensor | None,
+    *,
+    pairwise_tf_indices: bool = False,
 ) -> torch.Tensor:
+    if pairwise_tf_indices:
+        if tf_indices is None:
+            raise ValueError("pairwise_tf_indices=True requires tf_indices")
+        if getattr(model, "supports_pairwise_tf_indices", False):
+            return model(
+                x,
+                tf_indices=tf_indices,
+                pairwise_tf_indices=True,
+            )
+        logits = model(x)
+        gather_idx = tf_indices.view(-1, 1, 1).expand(-1, 1, logits.shape[-1])
+        return logits.gather(1, gather_idx)
+
     if getattr(model, "supports_tf_indices", False):
         return model(x, tf_indices=tf_indices)
     logits = model(x)
@@ -758,6 +854,16 @@ def select_tf_axis(
     if tf_indices is None:
         return tensor
     return tensor.index_select(1, tf_indices)
+
+
+def select_pos_weight_per_example(
+    pos_weight: torch.Tensor | None,
+    tf_indices: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if pos_weight is None or tf_indices is None:
+        return pos_weight
+    flat = pos_weight.view(-1)
+    return flat.index_select(0, tf_indices).view(-1, 1, 1)
 
 
 def make_dense_targets(
@@ -830,13 +936,19 @@ def collate_promoter_batch(
     else:
         raise ValueError(f"Unsupported input mode: {input_mode}")
 
-    return {
+    batch = {
         "x": x_batch,
         "y": y_batch,
         "hard_y": hard_y_batch,
         "mask": mask_batch,
         "meta": [item["meta"] for item in items],
     }
+    if "tf_idx" in items[0]:
+        batch["tf_idx"] = torch.tensor(
+            [int(item["tf_idx"]) for item in items],
+            dtype=torch.long,
+        )
+    return batch
 
 
 def compute_dense_pos_weight(
@@ -1037,6 +1149,18 @@ def model_config_from_args(
         "loss": args.loss,
         "focal_gamma": args.focal_gamma,
         "focal_alpha": args.focal_alpha,
+        "training_window_mode": args.training_window_mode,
+        "sampled_window_size": args.sampled_window_size,
+        "sampled_window_samples_per_epoch": args.sampled_window_samples_per_epoch,
+        "sampled_window_positive_fraction": args.sampled_window_positive_fraction,
+        "sampled_window_hard_negative_fraction": (
+            args.sampled_window_hard_negative_fraction
+        ),
+        "sampled_window_margin_bp": args.sampled_window_margin_bp,
+        "sampled_window_negative_exclusion_bp": (
+            args.sampled_window_negative_exclusion_bp
+        ),
+        "sampled_window_max_attempts": args.sampled_window_max_attempts,
         "hidden_channels": args.hidden_channels,
         "kernel_size": args.kernel_size,
         "dropout": args.dropout,
@@ -1295,26 +1419,41 @@ def train_one_epoch(
         y = batch["y"].to(device, non_blocking=True)
         hard_y = batch["hard_y"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
+        batch_tf_indices = batch.get("tf_idx")
+        if batch_tf_indices is not None:
+            batch_tf_indices = batch_tf_indices.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        logits = forward_dense_model(model, x, model_tf_indices)
-        y = make_dense_targets(
-            y,
-            label_mode=label_mode,
-            model_tf_indices=model_tf_indices,
-            merge_tf_indices=merge_tf_indices,
-        )
-        hard_y = make_dense_targets(
-            hard_y,
-            label_mode=label_mode,
-            model_tf_indices=model_tf_indices,
-            merge_tf_indices=merge_tf_indices,
-        )
-        batch_pos_weight = (
-            select_tf_axis(pos_weight, model_tf_indices)
-            if pos_weight is not None and label_mode == "tf"
-            else pos_weight
-        )
+        if batch_tf_indices is not None:
+            logits = forward_dense_model(
+                model,
+                x,
+                batch_tf_indices,
+                pairwise_tf_indices=True,
+            )
+            batch_pos_weight = select_pos_weight_per_example(
+                pos_weight,
+                batch_tf_indices,
+            )
+        else:
+            logits = forward_dense_model(model, x, model_tf_indices)
+            y = make_dense_targets(
+                y,
+                label_mode=label_mode,
+                model_tf_indices=model_tf_indices,
+                merge_tf_indices=merge_tf_indices,
+            )
+            hard_y = make_dense_targets(
+                hard_y,
+                label_mode=label_mode,
+                model_tf_indices=model_tf_indices,
+                merge_tf_indices=merge_tf_indices,
+            )
+            batch_pos_weight = (
+                select_tf_axis(pos_weight, model_tf_indices)
+                if pos_weight is not None and label_mode == "tf"
+                else pos_weight
+            )
         if logits.shape != y.shape:
             raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
         if logits.shape != hard_y.shape:
@@ -1408,27 +1547,45 @@ def evaluate_dense(
             y = batch["y"].to(device, non_blocking=True)
             hard_y = batch["hard_y"].to(device, non_blocking=True)
             mask = batch["mask"].to(device, non_blocking=True)
+            batch_tf_indices = batch.get("tf_idx")
+            if batch_tf_indices is not None:
+                batch_tf_indices = batch_tf_indices.to(device, non_blocking=True)
 
-            logits = forward_dense_model(model, x, model_tf_indices)
-            y = make_dense_targets(
-                y,
-                label_mode=label_mode,
-                model_tf_indices=model_tf_indices,
-                merge_tf_indices=merge_tf_indices,
-            )
-            hard_y = make_dense_targets(
-                hard_y,
-                label_mode=label_mode,
-                model_tf_indices=model_tf_indices,
-                merge_tf_indices=merge_tf_indices,
-            )
-            batch_pos_weight = (
-                select_tf_axis(pos_weight, model_tf_indices)
-                if pos_weight is not None and label_mode == "tf"
-                else None
-            )
-            if label_mode != "tf":
-                batch_pos_weight = pos_weight
+            if batch_tf_indices is not None:
+                logits = forward_dense_model(
+                    model,
+                    x,
+                    batch_tf_indices,
+                    pairwise_tf_indices=True,
+                )
+                batch_pos_weight = select_pos_weight_per_example(
+                    pos_weight,
+                    batch_tf_indices,
+                )
+                selected_tf_names = None
+                per_tf_score_chunks = None
+                per_tf_target_chunks = None
+            else:
+                logits = forward_dense_model(model, x, model_tf_indices)
+                y = make_dense_targets(
+                    y,
+                    label_mode=label_mode,
+                    model_tf_indices=model_tf_indices,
+                    merge_tf_indices=merge_tf_indices,
+                )
+                hard_y = make_dense_targets(
+                    hard_y,
+                    label_mode=label_mode,
+                    model_tf_indices=model_tf_indices,
+                    merge_tf_indices=merge_tf_indices,
+                )
+                batch_pos_weight = (
+                    select_tf_axis(pos_weight, model_tf_indices)
+                    if pos_weight is not None and label_mode == "tf"
+                    else None
+                )
+                if label_mode != "tf":
+                    batch_pos_weight = pos_weight
             if logits.shape != y.shape:
                 raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
             if logits.shape != hard_y.shape:
@@ -1617,10 +1774,30 @@ def main() -> None:
     print("Device:", device)
     print("Model:", args.model)
 
+    if args.training_window_mode == "sampled_windows":
+        train_dataset = BindingBenchSampledPromoterWindowDataset(
+            dataset,
+            promoter_indices=train_indices,
+            tf_indices=train_tf_indices,
+            window_size=args.sampled_window_size,
+            samples_per_epoch=args.sampled_window_samples_per_epoch,
+            positive_fraction=args.sampled_window_positive_fraction,
+            hard_negative_fraction=args.sampled_window_hard_negative_fraction,
+            margin_bp=args.sampled_window_margin_bp,
+            negative_exclusion_bp=args.sampled_window_negative_exclusion_bp,
+            seed=args.seed,
+            max_sampling_attempts=args.sampled_window_max_attempts,
+        )
+        train_shuffle = False
+        print("Training window sampler:", train_dataset.summary())
+    else:
+        train_dataset = Subset(dataset, train_indices)
+        train_shuffle = True
+
     train_loader = DataLoader(
-        Subset(dataset, train_indices),
+        train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=train_shuffle,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
         collate_fn=partial(collate_promoter_batch, input_mode=args.input_mode),
@@ -1725,6 +1902,8 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     save_json(args.output_dir / "tf_names.json", dataset.tf_names)
     save_json(args.output_dir / "dataset_summary.json", dataset.summary())
+    if hasattr(train_dataset, "summary"):
+        save_json(args.output_dir / "train_dataset_summary.json", train_dataset.summary())
     save_json(args.output_dir / "args.json", serializable_args(args))
     save_json(
         args.output_dir / "model_config.json",

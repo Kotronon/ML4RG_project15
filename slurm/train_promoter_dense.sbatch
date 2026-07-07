@@ -56,6 +56,14 @@ LABEL_MODE="${LABEL_MODE:-tf}"
 LOSS="${LOSS:-bce}"
 FOCAL_GAMMA="${FOCAL_GAMMA:-2.0}"
 FOCAL_ALPHA="${FOCAL_ALPHA:-}"
+TRAINING_WINDOW_MODE="${TRAINING_WINDOW_MODE:-full_promoter}"
+SAMPLED_WINDOW_SIZE="${SAMPLED_WINDOW_SIZE:-200}"
+SAMPLED_WINDOW_SAMPLES_PER_EPOCH="${SAMPLED_WINDOW_SAMPLES_PER_EPOCH:-50000}"
+SAMPLED_WINDOW_POSITIVE_FRACTION="${SAMPLED_WINDOW_POSITIVE_FRACTION:-0.5}"
+SAMPLED_WINDOW_HARD_NEGATIVE_FRACTION="${SAMPLED_WINDOW_HARD_NEGATIVE_FRACTION:-0.25}"
+SAMPLED_WINDOW_MARGIN_BP="${SAMPLED_WINDOW_MARGIN_BP:-30}"
+SAMPLED_WINDOW_NEGATIVE_EXCLUSION_BP="${SAMPLED_WINDOW_NEGATIVE_EXCLUSION_BP:-10}"
+SAMPLED_WINDOW_MAX_ATTEMPTS="${SAMPLED_WINDOW_MAX_ATTEMPTS:-100}"
 
 DNA_ATTENTION_WINDOW_BP="${DNA_ATTENTION_WINDOW_BP:-50}"
 DNA_ATTENTION_LAYERS="${DNA_ATTENTION_LAYERS:-2}"
@@ -154,6 +162,14 @@ echo "Label mode:           ${LABEL_MODE}"
 echo "Loss:                 ${LOSS}"
 echo "Focal gamma:          ${FOCAL_GAMMA}"
 echo "Focal alpha:          ${FOCAL_ALPHA:-<none>}"
+echo "Training window mode: ${TRAINING_WINDOW_MODE}"
+echo "Sampled window size:  ${SAMPLED_WINDOW_SIZE}"
+echo "Samples per epoch:    ${SAMPLED_WINDOW_SAMPLES_PER_EPOCH}"
+echo "Positive fraction:    ${SAMPLED_WINDOW_POSITIVE_FRACTION}"
+echo "Hard neg fraction:    ${SAMPLED_WINDOW_HARD_NEGATIVE_FRACTION}"
+echo "Sample margin bp:     ${SAMPLED_WINDOW_MARGIN_BP}"
+echo "Neg exclusion bp:     ${SAMPLED_WINDOW_NEGATIVE_EXCLUSION_BP}"
+echo "Sample max attempts:  ${SAMPLED_WINDOW_MAX_ATTEMPTS}"
 
 echo "DNA attn window bp:   ${DNA_ATTENTION_WINDOW_BP}"
 echo "DNA attn layers:      ${DNA_ATTENTION_LAYERS}"
@@ -290,6 +306,14 @@ fi
     --label-mode "${LABEL_MODE}" \
     --loss "${LOSS}" \
     --focal-gamma "${FOCAL_GAMMA}" \
+    --training-window-mode "${TRAINING_WINDOW_MODE}" \
+    --sampled-window-size "${SAMPLED_WINDOW_SIZE}" \
+    --sampled-window-samples-per-epoch "${SAMPLED_WINDOW_SAMPLES_PER_EPOCH}" \
+    --sampled-window-positive-fraction "${SAMPLED_WINDOW_POSITIVE_FRACTION}" \
+    --sampled-window-hard-negative-fraction "${SAMPLED_WINDOW_HARD_NEGATIVE_FRACTION}" \
+    --sampled-window-margin-bp "${SAMPLED_WINDOW_MARGIN_BP}" \
+    --sampled-window-negative-exclusion-bp "${SAMPLED_WINDOW_NEGATIVE_EXCLUSION_BP}" \
+    --sampled-window-max-attempts "${SAMPLED_WINDOW_MAX_ATTEMPTS}" \
     --dna-attention-window-bp "${DNA_ATTENTION_WINDOW_BP}" \
     --dna-attention-layers "${DNA_ATTENTION_LAYERS}" \
     --dna-attention-heads "${DNA_ATTENTION_HEADS}" \

@@ -7,7 +7,7 @@ from typing import Iterable, Literal
 import numpy as np
 import polars as pl
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, get_worker_info
 
 
 DEFAULT_SITES_PATH = Path(
@@ -880,3 +880,393 @@ class BindingBenchPromoterEmbeddingDataset(BindingBenchPromoterBaseDataset):
                 f"{embedding.shape[0]} embeddings vs {len(record.sequence)} bases"
             )
         return torch.from_numpy(np.asarray(embedding, dtype=np.float32))
+
+
+class BindingBenchSampledPromoterWindowDataset(Dataset):
+    """Sample TF-conditioned promoter windows while keeping base-wise labels.
+
+    Each item is one ``(DNA window, TF)`` pair. Positive windows contain an
+    annotated site for the sampled TF at a randomized offset, hard negatives
+    contain a site for another sampled TF but not the target TF, and easy
+    negatives avoid sampled-TF sites in the crop.
+    """
+
+    def __init__(
+        self,
+        base_dataset: BindingBenchPromoterBaseDataset,
+        *,
+        promoter_indices: Iterable[int],
+        tf_indices: Iterable[int],
+        window_size: int = 200,
+        samples_per_epoch: int = 50_000,
+        positive_fraction: float = 0.5,
+        hard_negative_fraction: float = 0.25,
+        margin_bp: int = 30,
+        negative_exclusion_bp: int = 10,
+        seed: int = 42,
+        max_sampling_attempts: int = 100,
+    ) -> None:
+        if window_size <= 0:
+            raise ValueError("window_size must be positive")
+        if samples_per_epoch <= 0:
+            raise ValueError("samples_per_epoch must be positive")
+        if not 0.0 <= positive_fraction <= 1.0:
+            raise ValueError("positive_fraction must be in [0, 1]")
+        if not 0.0 <= hard_negative_fraction <= 1.0:
+            raise ValueError("hard_negative_fraction must be in [0, 1]")
+        if positive_fraction + hard_negative_fraction > 1.0:
+            raise ValueError("positive and hard-negative fractions must sum to <= 1")
+        if margin_bp < 0:
+            raise ValueError("margin_bp must be non-negative")
+        if margin_bp * 2 >= window_size:
+            raise ValueError("margin_bp must leave room inside the window")
+        if negative_exclusion_bp < 0:
+            raise ValueError("negative_exclusion_bp must be non-negative")
+        if max_sampling_attempts <= 0:
+            raise ValueError("max_sampling_attempts must be positive")
+
+        self.base_dataset = base_dataset
+        self.promoter_indices = [int(idx) for idx in promoter_indices]
+        self.tf_indices = sorted({int(idx) for idx in tf_indices})
+        if not self.promoter_indices:
+            raise ValueError("At least one promoter index is required")
+        if not self.tf_indices:
+            raise ValueError("At least one TF index is required")
+        if window_size > min(len(base_dataset.records[idx].sequence) for idx in self.promoter_indices):
+            raise ValueError("window_size must fit inside every sampled promoter")
+
+        self.window_size = int(window_size)
+        self.samples_per_epoch = int(samples_per_epoch)
+        self.positive_fraction = float(positive_fraction)
+        self.hard_negative_fraction = float(hard_negative_fraction)
+        self.margin_bp = int(margin_bp)
+        self.negative_exclusion_bp = int(negative_exclusion_bp)
+        self.seed = int(seed)
+        self.max_sampling_attempts = int(max_sampling_attempts)
+        self.tf_set = set(self.tf_indices)
+        self._rng: np.random.Generator | None = None
+        self._rng_seed: int | None = None
+
+        self.positive_anchors_by_tf: dict[int, list[tuple[int, int, int]]] = {
+            tf_idx: [] for tf_idx in self.tf_indices
+        }
+        self.flat_positive_anchors: list[tuple[int, int, int, int]] = []
+        self._build_positive_anchors()
+        self.positive_tfs = [
+            tf_idx
+            for tf_idx, anchors in self.positive_anchors_by_tf.items()
+            if anchors
+        ]
+        if self.positive_fraction > 0 and not self.positive_tfs:
+            raise ValueError("Positive sampling requested but no positive anchors exist")
+        if self.hard_negative_fraction > 0 and len(self.flat_positive_anchors) == 0:
+            raise ValueError("Hard-negative sampling requested but no anchors exist")
+
+    def __len__(self) -> int:
+        return self.samples_per_epoch
+
+    def __getitem__(self, idx: int) -> dict[str, object]:
+        del idx
+        rng = self._worker_rng()
+        kind_value = float(rng.random())
+        if kind_value < self.positive_fraction:
+            return self._sample_positive(rng)
+        if kind_value < self.positive_fraction + self.hard_negative_fraction:
+            return self._sample_hard_negative(rng)
+        return self._sample_easy_negative(rng)
+
+    def summary(self) -> dict[str, object]:
+        return {
+            "n_base_promoters": len(self.base_dataset),
+            "n_sampled_promoters": len(self.promoter_indices),
+            "n_sampled_tfs": len(self.tf_indices),
+            "n_positive_tfs": len(self.positive_tfs),
+            "n_positive_anchors": len(self.flat_positive_anchors),
+            "window_size": self.window_size,
+            "samples_per_epoch": self.samples_per_epoch,
+            "positive_fraction": self.positive_fraction,
+            "hard_negative_fraction": self.hard_negative_fraction,
+            "easy_negative_fraction": (
+                1.0 - self.positive_fraction - self.hard_negative_fraction
+            ),
+            "margin_bp": self.margin_bp,
+            "negative_exclusion_bp": self.negative_exclusion_bp,
+        }
+
+    def _worker_rng(self) -> np.random.Generator:
+        worker = get_worker_info()
+        if worker is None:
+            seed = self.seed
+        else:
+            seed = int(torch.initial_seed() % (2**32))
+        if self._rng is None or self._rng_seed != seed:
+            self._rng = np.random.default_rng(seed)
+            self._rng_seed = seed
+        return self._rng
+
+    def _build_positive_anchors(self) -> None:
+        promoter_set = set(self.promoter_indices)
+        for promoter_idx in self.promoter_indices:
+            record = self.base_dataset.records[promoter_idx]
+            for tf_idx, lo, hi in record.label_intervals:
+                tf_idx = int(tf_idx)
+                if tf_idx not in self.tf_set or hi <= lo:
+                    continue
+                anchor = (promoter_idx, int(lo), int(hi))
+                self.positive_anchors_by_tf[tf_idx].append(anchor)
+                self.flat_positive_anchors.append((tf_idx, *anchor))
+
+        # Avoid holding stale indices if the input iterable had duplicates.
+        self.promoter_indices = sorted(promoter_set)
+
+    def _sample_positive(self, rng: np.random.Generator) -> dict[str, object]:
+        for _ in range(self.max_sampling_attempts):
+            tf_idx = int(rng.choice(self.positive_tfs))
+            promoter_idx, lo, hi = self.positive_anchors_by_tf[tf_idx][
+                int(rng.integers(len(self.positive_anchors_by_tf[tf_idx])))
+            ]
+            start = self._window_start_around_interval(rng, promoter_idx, lo, hi)
+            if start is not None:
+                return self._make_item(promoter_idx, tf_idx, start, "positive")
+        return self._fallback_positive(rng)
+
+    def _sample_hard_negative(self, rng: np.random.Generator) -> dict[str, object]:
+        if len(self.tf_indices) < 2:
+            return self._sample_easy_negative(rng)
+
+        for _ in range(self.max_sampling_attempts):
+            other_tf, promoter_idx, lo, hi = self.flat_positive_anchors[
+                int(rng.integers(len(self.flat_positive_anchors)))
+            ]
+            candidate_tfs = [tf_idx for tf_idx in self.tf_indices if tf_idx != other_tf]
+            target_tf = int(rng.choice(candidate_tfs))
+            start = self._window_start_around_interval(rng, promoter_idx, lo, hi)
+            if start is None:
+                continue
+            end = start + self.window_size
+            if self._has_tf_overlap(
+                self.base_dataset.records[promoter_idx],
+                target_tf,
+                start,
+                end,
+                buffer_bp=self.negative_exclusion_bp,
+            ):
+                continue
+            return self._make_item(promoter_idx, target_tf, start, "hard_negative")
+
+        return self._sample_easy_negative(rng)
+
+    def _sample_easy_negative(self, rng: np.random.Generator) -> dict[str, object]:
+        for _ in range(self.max_sampling_attempts):
+            promoter_idx = int(rng.choice(self.promoter_indices))
+            record = self.base_dataset.records[promoter_idx]
+            max_start = len(record.sequence) - self.window_size
+            if max_start < 0:
+                continue
+            start = int(rng.integers(max_start + 1))
+            end = start + self.window_size
+            if self._has_any_tf_overlap(
+                record,
+                start,
+                end,
+                buffer_bp=self.negative_exclusion_bp,
+            ):
+                continue
+            target_tf = int(rng.choice(self.tf_indices))
+            return self._make_item(promoter_idx, target_tf, start, "easy_negative")
+
+        for _ in range(self.max_sampling_attempts):
+            promoter_idx = int(rng.choice(self.promoter_indices))
+            record = self.base_dataset.records[promoter_idx]
+            max_start = len(record.sequence) - self.window_size
+            if max_start < 0:
+                continue
+            start = int(rng.integers(max_start + 1))
+            end = start + self.window_size
+            target_tf = int(rng.choice(self.tf_indices))
+            if not self._has_tf_overlap(
+                record,
+                target_tf,
+                start,
+                end,
+                buffer_bp=self.negative_exclusion_bp,
+            ):
+                return self._make_item(promoter_idx, target_tf, start, "easy_negative")
+
+        return self._fallback_negative(rng)
+
+    def _fallback_positive(self, rng: np.random.Generator) -> dict[str, object]:
+        tf_idx, promoter_idx, lo, hi = self.flat_positive_anchors[
+            int(rng.integers(len(self.flat_positive_anchors)))
+        ]
+        record = self.base_dataset.records[promoter_idx]
+        base = int(rng.integers(lo, hi))
+        start = min(max(0, base - self.window_size // 2), len(record.sequence) - self.window_size)
+        return self._make_item(promoter_idx, tf_idx, start, "positive_fallback")
+
+    def _fallback_negative(self, rng: np.random.Generator) -> dict[str, object]:
+        promoter_idx = int(rng.choice(self.promoter_indices))
+        record = self.base_dataset.records[promoter_idx]
+        max_start = len(record.sequence) - self.window_size
+        start = int(rng.integers(max_start + 1))
+        target_tf = int(rng.choice(self.tf_indices))
+        return self._make_item(promoter_idx, target_tf, start, "negative_fallback")
+
+    def _window_start_around_interval(
+        self,
+        rng: np.random.Generator,
+        promoter_idx: int,
+        lo: int,
+        hi: int,
+    ) -> int | None:
+        record = self.base_dataset.records[promoter_idx]
+        if len(record.sequence) < self.window_size:
+            return None
+
+        base = int(rng.integers(lo, hi))
+        offset = int(rng.integers(self.margin_bp, self.window_size - self.margin_bp))
+        start = base - offset
+        if 0 <= start <= len(record.sequence) - self.window_size:
+            return start
+
+        valid_lo = max(0, base - (self.window_size - self.margin_bp - 1))
+        valid_hi = min(base - self.margin_bp, len(record.sequence) - self.window_size)
+        if valid_hi >= valid_lo:
+            return int(rng.integers(valid_lo, valid_hi + 1))
+        return None
+
+    def _make_item(
+        self,
+        promoter_idx: int,
+        tf_idx: int,
+        window_start: int,
+        sampling_kind: str,
+    ) -> dict[str, object]:
+        record = self.base_dataset.records[promoter_idx]
+        window_end = window_start + self.window_size
+        x_full = self.base_dataset._get_x(promoter_idx, record)
+        if x_full.ndim != 2:
+            raise ValueError(f"Expected 2D promoter input, got {x_full.shape}")
+        if x_full.shape[0] == len(record.sequence):
+            x = x_full[window_start:window_end, :].clone()
+        else:
+            x = x_full[:, window_start:window_end].clone()
+
+        labels, hard_labels = self._window_labels(record, tf_idx, window_start, window_end)
+        mask = np.ones(self.window_size, dtype=bool)
+        return {
+            "x": x,
+            "y": torch.tensor(labels, dtype=torch.float32),
+            "hard_y": torch.tensor(hard_labels, dtype=torch.float32),
+            "mask": torch.tensor(mask, dtype=torch.bool),
+            "tf_idx": torch.tensor(tf_idx, dtype=torch.long),
+            "meta": {
+                "record_idx": promoter_idx,
+                "chrom": record.chrom,
+                "start": record.start,
+                "end": record.end,
+                "strand": record.strand,
+                "gene_id": record.gene_id,
+                "window_start": window_start,
+                "window_end": window_end,
+                "tf_idx": tf_idx,
+                "tf_name": self.base_dataset.tf_names[tf_idx],
+                "sampling_kind": sampling_kind,
+                "has_positive_label": bool(hard_labels.any()),
+            },
+        }
+
+    def _window_labels(
+        self,
+        record: PromoterRecord,
+        tf_idx: int,
+        window_start: int,
+        window_end: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        hard = np.zeros((1, self.window_size), dtype=np.float32)
+        labels = np.zeros((1, self.window_size), dtype=np.float32)
+        radius = self.base_dataset.label_smoothing_radius_bp
+        mode = self.base_dataset.label_smoothing_mode
+        sigma_bp = self.base_dataset.label_smoothing_sigma_bp
+
+        for interval_tf, lo, hi in record.label_intervals:
+            if int(interval_tf) != int(tf_idx):
+                continue
+            overlap_lo = max(int(lo), window_start)
+            overlap_hi = min(int(hi), window_end)
+            if overlap_hi <= overlap_lo:
+                continue
+
+            rel_lo = overlap_lo - window_start
+            rel_hi = overlap_hi - window_start
+            hard[0, rel_lo:rel_hi] = 1.0
+            labels[0, rel_lo:rel_hi] = 1.0
+
+            if mode == "hard" or radius <= 0:
+                continue
+
+            smooth_lo = max(0, rel_lo - radius)
+            smooth_hi = min(self.window_size, rel_hi + radius)
+            if smooth_hi <= smooth_lo:
+                continue
+
+            if mode == "hard-dilate":
+                labels[0, smooth_lo:smooth_hi] = 1.0
+                continue
+
+            positions = np.arange(smooth_lo, smooth_hi)
+            distances = np.zeros_like(positions, dtype=np.float32)
+            before = positions < rel_lo
+            after = positions >= rel_hi
+            distances[before] = rel_lo - positions[before]
+            distances[after] = positions[after] - rel_hi + 1
+
+            if mode == "linear":
+                values = np.maximum(0.0, 1.0 - distances / float(radius + 1))
+            elif mode == "gaussian":
+                sigma = sigma_bp if sigma_bp is not None else max(radius / 2.0, 1.0)
+                values = np.exp(-0.5 * (distances / float(sigma)) ** 2)
+            else:
+                raise ValueError(f"Unsupported label_smoothing_mode: {mode}")
+
+            labels[0, smooth_lo:smooth_hi] = np.maximum(
+                labels[0, smooth_lo:smooth_hi],
+                values.astype(np.float32),
+            )
+
+        return labels, hard
+
+    def _has_tf_overlap(
+        self,
+        record: PromoterRecord,
+        tf_idx: int,
+        window_start: int,
+        window_end: int,
+        *,
+        buffer_bp: int,
+    ) -> bool:
+        query_start = window_start - buffer_bp
+        query_end = window_end + buffer_bp
+        for interval_tf, lo, hi in record.label_intervals:
+            if int(interval_tf) != int(tf_idx):
+                continue
+            if int(hi) > query_start and int(lo) < query_end:
+                return True
+        return False
+
+    def _has_any_tf_overlap(
+        self,
+        record: PromoterRecord,
+        window_start: int,
+        window_end: int,
+        *,
+        buffer_bp: int,
+    ) -> bool:
+        query_start = window_start - buffer_bp
+        query_end = window_end + buffer_bp
+        for interval_tf, lo, hi in record.label_intervals:
+            if int(interval_tf) not in self.tf_set:
+                continue
+            if int(hi) > query_start and int(lo) < query_end:
+                return True
+        return False
