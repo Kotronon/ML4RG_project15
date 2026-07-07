@@ -80,6 +80,7 @@ PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_res_dilated_cnn",
     "dense_protein_local_attention",
     "dense_protein_motif_cnn",
+    "dense_protein_residual_bilinear_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )
@@ -332,6 +333,36 @@ def parse_args() -> argparse.Namespace:
         help="L2-normalize adapted TF vectors before scoring.",
     )
     parser.add_argument(
+        "--protein-delta-gate-logit-init",
+        type=float,
+        default=-3.0,
+        help=(
+            "Initial logit for residual protein-conditioned score scale in "
+            "dense_protein_residual_bilinear_cnn."
+        ),
+    )
+    parser.add_argument(
+        "--pretrained-dna-checkpoint",
+        type=Path,
+        help=(
+            "Optional DNA-only dense checkpoint used to initialize the DNA "
+            "branch of compatible protein-conditioned models."
+        ),
+    )
+    parser.add_argument(
+        "--freeze-dna-branch",
+        action="store_true",
+        help=(
+            "Freeze the initialized DNA branch and keep it in eval mode during "
+            "training. Intended for the first residual protein-conditioning run."
+        ),
+    )
+    parser.add_argument(
+        "--shuffle-tf-embeddings",
+        action="store_true",
+        help="Shuffle TF protein embeddings after building the TF split as a control.",
+    )
+    parser.add_argument(
         "--scorer",
         choices=("multihead_bilinear", "mlp"),
         default="multihead_bilinear",
@@ -499,6 +530,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--focal-alpha must be between 0 and 1")
     if args.label_mode != "tf" and args.model in PROTEIN_DENSE_MODEL_NAMES:
         raise ValueError("--label-mode merged_train_tfs is intended for DNA-only models")
+    if args.freeze_dna_branch and args.pretrained_dna_checkpoint is None:
+        raise ValueError("--freeze-dna-branch requires --pretrained-dna-checkpoint")
     if not 0.0 <= args.tf_embedding_dropout < 1.0:
         raise ValueError("--tf-embedding-dropout must be in [0, 1)")
     if args.dna_attention_window_bp < 0:
@@ -1020,6 +1053,14 @@ def model_config_from_args(
         "motif_kernel_sizes": list(parse_int_tuple(args.motif_kernel_sizes)),
         "protein_noise_std": args.protein_noise_std,
         "protein_l2_normalize": args.protein_l2_normalize,
+        "protein_delta_gate_logit_init": args.protein_delta_gate_logit_init,
+        "pretrained_dna_checkpoint": (
+            str(args.pretrained_dna_checkpoint)
+            if args.pretrained_dna_checkpoint
+            else None
+        ),
+        "freeze_dna_branch": args.freeze_dna_branch,
+        "shuffle_tf_embeddings": args.shuffle_tf_embeddings,
         "scorer": args.scorer,
         "scorer_heads": args.scorer_heads,
         "scorer_pair_dim": args.scorer_pair_dim,
@@ -1043,6 +1084,52 @@ def model_config_from_args(
 
 def count_parameters(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+
+
+def load_pretrained_dna_branch(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    device: torch.device,
+) -> None:
+    dna_model = getattr(model, "dna_model", None)
+    if dna_model is None:
+        raise ValueError(
+            f"Model {type(model).__name__} has no dna_model branch for "
+            "--pretrained-dna-checkpoint"
+        )
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    state = checkpoint.get("model_state_dict", checkpoint)
+    if not isinstance(state, dict):
+        raise ValueError(f"Checkpoint has no state dict: {checkpoint_path}")
+
+    if any(str(key).startswith("dna_model.") for key in state):
+        state = {
+            str(key).removeprefix("dna_model."): value
+            for key, value in state.items()
+            if str(key).startswith("dna_model.")
+        }
+
+    incompatible = dna_model.load_state_dict(state, strict=False)
+    missing = list(incompatible.missing_keys)
+    unexpected = list(incompatible.unexpected_keys)
+    print(
+        "Loaded pretrained DNA branch:",
+        {
+            "checkpoint": str(checkpoint_path),
+            "missing_keys": missing,
+            "unexpected_keys": unexpected,
+        },
+    )
+
+
+def freeze_dna_branch(model: torch.nn.Module) -> None:
+    freeze_method = getattr(model, "freeze_dna_branch", None)
+    if not callable(freeze_method):
+        raise ValueError(f"Model {type(model).__name__} does not support DNA freezing")
+    freeze_method()
 
 
 def save_checkpoint(
@@ -1391,6 +1478,22 @@ def main() -> None:
         )
 
     tf_split = build_tf_split(args, dataset, tf_embeddings=tf_embeddings)
+    if args.shuffle_tf_embeddings:
+        if tf_embeddings is None:
+            raise ValueError("--shuffle-tf-embeddings requires TF embeddings")
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(args.seed)
+        permutation = torch.randperm(tf_embeddings.shape[0], generator=generator)
+        tf_embeddings = tf_embeddings.index_select(0, permutation)
+        if tf_embedding_metadata is None:
+            tf_embedding_metadata = {}
+        tf_embedding_metadata["shuffled"] = True
+        tf_embedding_metadata["shuffle_seed"] = args.seed
+        tf_embedding_metadata["shuffle_permutation"] = permutation.tolist()
+        print(
+            "Shuffled TF embeddings:",
+            {"seed": args.seed, "n_tfs": int(tf_embeddings.shape[0])},
+        )
     train_indices = split_indices(promoter_split, "train")
     val_indices = split_indices(promoter_split, "val")
     test_indices = split_indices(promoter_split, "test")
@@ -1470,16 +1573,28 @@ def main() -> None:
         motif_kernel_sizes=parse_int_tuple(args.motif_kernel_sizes),
         protein_noise_std=args.protein_noise_std,
         protein_l2_normalize=args.protein_l2_normalize,
+        protein_delta_gate_logit_init=args.protein_delta_gate_logit_init,
         scorer=args.scorer,
         scorer_heads=args.scorer_heads,
         scorer_pair_dim=args.scorer_pair_dim,
         scorer_hidden_dim=args.scorer_hidden_dim,
         scorer_bias_mode=args.scorer_bias_mode,
     ).to(device)
+
+    if args.pretrained_dna_checkpoint is not None:
+        load_pretrained_dna_branch(model, args.pretrained_dna_checkpoint, device)
+    if args.freeze_dna_branch:
+        freeze_dna_branch(model)
+        print("Frozen DNA branch.")
     print("Trainable parameters:", count_parameters(model))
 
+    trainable_parameters = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
+    if not trainable_parameters:
+        raise ValueError("Model has no trainable parameters")
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        trainable_parameters,
         lr=args.lr,
         weight_decay=args.weight_decay,
     )

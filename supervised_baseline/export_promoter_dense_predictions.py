@@ -53,6 +53,7 @@ PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_res_dilated_cnn",
     "dense_protein_local_attention",
     "dense_protein_motif_cnn",
+    "dense_protein_residual_bilinear_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )
@@ -257,6 +258,12 @@ def resolve_export_config(
             saved_args.get("protein_l2_normalize", False),
         )
     )
+    protein_delta_gate_logit_init = float(
+        saved_config.get(
+            "protein_delta_gate_logit_init",
+            saved_args.get("protein_delta_gate_logit_init", -3.0),
+        )
+    )
     scorer = str(saved_config.get("scorer", saved_args.get("scorer", "multihead_bilinear")))
     scorer_heads = int(saved_config.get("scorer_heads", saved_args.get("scorer_heads", 8)))
     scorer_pair_dim = int(
@@ -353,6 +360,7 @@ def resolve_export_config(
         "motif_kernel_sizes": parse_int_tuple(motif_kernel_sizes_raw),
         "protein_noise_std": protein_noise_std,
         "protein_l2_normalize": protein_l2_normalize,
+        "protein_delta_gate_logit_init": protein_delta_gate_logit_init,
         "scorer": scorer,
         "scorer_heads": scorer_heads,
         "scorer_pair_dim": scorer_pair_dim,
@@ -689,6 +697,7 @@ def main() -> None:
         motif_kernel_sizes=config["motif_kernel_sizes"],
         protein_noise_std=float(config["protein_noise_std"]),
         protein_l2_normalize=bool(config["protein_l2_normalize"]),
+        protein_delta_gate_logit_init=float(config["protein_delta_gate_logit_init"]),
         scorer=str(config["scorer"]),
         scorer_heads=int(config["scorer_heads"]),
         scorer_pair_dim=int(config["scorer_pair_dim"]),

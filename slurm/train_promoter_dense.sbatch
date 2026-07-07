@@ -64,6 +64,10 @@ DNA_ATTENTION_FFN_MULTIPLIER="${DNA_ATTENTION_FFN_MULTIPLIER:-4.0}"
 MOTIF_KERNEL_SIZES="${MOTIF_KERNEL_SIZES:-7,11,15}"
 PROTEIN_NOISE_STD="${PROTEIN_NOISE_STD:-0.0}"
 PROTEIN_L2_NORMALIZE="${PROTEIN_L2_NORMALIZE:-false}"
+PROTEIN_DELTA_GATE_LOGIT_INIT="${PROTEIN_DELTA_GATE_LOGIT_INIT:--3.0}"
+PRETRAINED_DNA_CHECKPOINT="${PRETRAINED_DNA_CHECKPOINT:-}"
+FREEZE_DNA_BRANCH="${FREEZE_DNA_BRANCH:-false}"
+SHUFFLE_TF_EMBEDDINGS="${SHUFFLE_TF_EMBEDDINGS:-false}"
 SCORER="${SCORER:-multihead_bilinear}"
 SCORER_HEADS="${SCORER_HEADS:-8}"
 SCORER_PAIR_DIM="${SCORER_PAIR_DIM:-32}"
@@ -158,6 +162,10 @@ echo "DNA attn FFN mult:    ${DNA_ATTENTION_FFN_MULTIPLIER}"
 echo "Motif kernel sizes:   ${MOTIF_KERNEL_SIZES}"
 echo "Protein noise std:    ${PROTEIN_NOISE_STD}"
 echo "Protein L2 normalize: ${PROTEIN_L2_NORMALIZE}"
+echo "Protein delta gate:   ${PROTEIN_DELTA_GATE_LOGIT_INIT}"
+echo "Pretrained DNA ckpt:  ${PRETRAINED_DNA_CHECKPOINT:-<none>}"
+echo "Freeze DNA branch:    ${FREEZE_DNA_BRANCH}"
+echo "Shuffle TF emb:       ${SHUFFLE_TF_EMBEDDINGS}"
 echo "Scorer:               ${SCORER}"
 echo "Scorer heads:         ${SCORER_HEADS}"
 echo "Scorer pair dim:      ${SCORER_PAIR_DIM}"
@@ -252,6 +260,15 @@ fi
 if [[ "${PROTEIN_L2_NORMALIZE}" == "true" ]]; then
     OPTIONAL_ARGS+=(--protein-l2-normalize)
 fi
+if [[ -n "${PRETRAINED_DNA_CHECKPOINT}" ]]; then
+    OPTIONAL_ARGS+=(--pretrained-dna-checkpoint "${PRETRAINED_DNA_CHECKPOINT}")
+fi
+if [[ "${FREEZE_DNA_BRANCH}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--freeze-dna-branch)
+fi
+if [[ "${SHUFFLE_TF_EMBEDDINGS}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--shuffle-tf-embeddings)
+fi
 
 "${PYTHON_BIN}" "${TRAIN_SCRIPT}" \
     --sites-path "${SITES_PATH}" \
@@ -279,6 +296,7 @@ fi
     --dna-attention-ffn-multiplier "${DNA_ATTENTION_FFN_MULTIPLIER}" \
     --motif-kernel-sizes "${MOTIF_KERNEL_SIZES}" \
     --protein-noise-std "${PROTEIN_NOISE_STD}" \
+    --protein-delta-gate-logit-init "${PROTEIN_DELTA_GATE_LOGIT_INIT}" \
     --scorer "${SCORER}" \
     --scorer-heads "${SCORER_HEADS}" \
     --scorer-pair-dim "${SCORER_PAIR_DIM}" \
