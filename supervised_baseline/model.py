@@ -1035,6 +1035,103 @@ class DenseTransBindCnnLstmAttention(nn.Module):
         logits = logits + self.tf_bias(tf_context)
         return logits
 
+class DenseMotifDilatedAttentionCNN(nn.Module):
+    """DNA-only dense base scorer with motif, dilated, and attention context.
+
+    The first stage uses motif-scale convolutions over the input sequence. The
+    residual dilated stack then broadens the local receptive field, and the
+    self-attention blocks let each position use configurable local or full
+    promoter context before the final per-position head.
+    """
+
+    def __init__(
+        self,
+        n_tfs: int,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 128,
+        motif_kernel_sizes: tuple[int, ...] = (21,),
+        kernel_size: int = 7,
+        dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+        dropout: float = 0.1,
+        dna_attention_window_bp: int = 50,
+        dna_attention_layers: int = 2,
+        dna_attention_heads: int = 8,
+        dna_attention_ffn_multiplier: float = 4.0,
+    ) -> None:
+        super().__init__()
+        if n_tfs <= 0:
+            raise ValueError("n_tfs must be positive")
+        if not motif_kernel_sizes:
+            raise ValueError("motif_kernel_sizes must not be empty")
+        if any(size <= 0 or size % 2 == 0 for size in motif_kernel_sizes):
+            raise ValueError("motif_kernel_sizes must contain positive odd integers")
+        if dna_attention_heads <= 0:
+            raise ValueError("dna_attention_heads must be positive")
+        if hidden_channels % dna_attention_heads != 0:
+            raise ValueError("hidden_channels must be divisible by dna_attention_heads")
+        if dna_attention_layers < 0:
+            raise ValueError("dna_attention_layers must be non-negative")
+
+        stem_channels = _split_channels(hidden_channels, len(motif_kernel_sizes))
+        self.motif_stem = nn.ModuleList(
+            [
+                nn.Conv1d(
+                    input_channels,
+                    out_channels,
+                    kernel_size=motif_kernel,
+                    padding=motif_kernel // 2,
+                )
+                for out_channels, motif_kernel in zip(stem_channels, motif_kernel_sizes)
+            ]
+        )
+        self.stem_norm = nn.BatchNorm1d(hidden_channels)
+        self.stem_activation = nn.GELU()
+        self.stem_dropout = nn.Dropout(dropout)
+
+        self.context_blocks = nn.ModuleList(
+            [
+                ResidualDilatedBlock(
+                    hidden_channels,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    dropout=dropout,
+                )
+                for dilation in dilations
+            ]
+        )
+        self.attention_blocks = nn.ModuleList(
+            [
+                LocalSelfAttentionBlock(
+                    hidden_channels,
+                    num_heads=dna_attention_heads,
+                    window_bp=dna_attention_window_bp,
+                    ffn_multiplier=dna_attention_ffn_multiplier,
+                    dropout=dropout,
+                )
+                for _ in range(dna_attention_layers)
+            ]
+        )
+        self.head = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, n_tfs),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dna = torch.cat([conv(x) for conv in self.motif_stem], dim=1)
+        dna = self.stem_dropout(self.stem_activation(self.stem_norm(dna)))
+        for block in self.context_blocks:
+            dna = block(dna)
+
+        dna = dna.transpose(1, 2)
+        for block in self.attention_blocks:
+            dna = block(dna)
+
+        return self.head(dna).transpose(1, 2)
+
 
 class TransBindLite(nn.Module):
     """Protein-conditioned TF binding model.
@@ -1139,6 +1236,7 @@ MODEL_NAMES = ("small_cnn", "res_dilated_cnn", "transbind_lite")
 DENSE_MODEL_NAMES = (
     "dense_small_cnn",
     "dense_res_dilated_cnn",
+    "dense_motif_dilated_attention_cnn",
     "dense_protein_res_dilated_cnn",
     "dense_protein_local_attention",
     "dense_protein_motif_cnn",
@@ -1248,6 +1346,20 @@ def build_dense_model(
             kernel_size=kernel_size,
             dropout=dropout,
             dilations=dilations,
+        )
+    if model_name == "dense_motif_dilated_attention_cnn":
+        return DenseMotifDilatedAttentionCNN(
+            n_tfs=n_tfs,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            motif_kernel_sizes=motif_kernel_sizes,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            dilations=dilations,
+            dna_attention_window_bp=dna_attention_window_bp,
+            dna_attention_layers=dna_attention_layers,
+            dna_attention_heads=dna_attention_heads,
+            dna_attention_ffn_multiplier=dna_attention_ffn_multiplier,
         )
     if model_name == "dense_protein_res_dilated_cnn":
         if tf_embeddings is None:

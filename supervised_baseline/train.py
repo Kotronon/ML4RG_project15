@@ -439,8 +439,11 @@ def build_tf_split(
         raw_split = make_named_similarity_holdout_tf_split(
             dataset.tf_names,
             tf_embeddings.detach().cpu().numpy(),
+            seed=args.seed,
             val_tfs=args.tf_val_names,
             test_tfs=args.tf_test_names,
+            train_fraction=args.tf_train_fraction,
+            val_fraction=args.tf_val_fraction,
             similarity_threshold=args.tf_similarity_threshold,
         )
     else:
