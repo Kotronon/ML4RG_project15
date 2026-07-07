@@ -1086,6 +1086,106 @@ def count_parameters(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
 
 
+def load_checkpoint_cpu(checkpoint_path: Path) -> dict[str, object]:
+    try:
+        return torch.load(
+            checkpoint_path,
+            map_location=torch.device("cpu"),
+            weights_only=False,
+        )
+    except TypeError:
+        return torch.load(checkpoint_path, map_location=torch.device("cpu"))
+
+
+def _checkpoint_dict(checkpoint: dict[str, object], key: str) -> dict[str, object]:
+    value = checkpoint.get(key, {})
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _stringify_int_sequence(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(int(item)) for item in value)
+    return str(value)
+
+
+def align_dna_branch_args_from_checkpoint(
+    args: argparse.Namespace,
+    *,
+    input_channels: int,
+) -> None:
+    if (
+        args.model != "dense_protein_residual_bilinear_cnn"
+        or args.pretrained_dna_checkpoint is None
+    ):
+        return
+
+    checkpoint = load_checkpoint_cpu(args.pretrained_dna_checkpoint)
+    config = _checkpoint_dict(checkpoint, "model_config")
+    saved_args = _checkpoint_dict(checkpoint, "args")
+    checkpoint_model = str(
+        checkpoint.get("model_name")
+        or config.get("model_name")
+        or saved_args.get("model", "")
+    )
+    if checkpoint_model not in {
+        "dense_motif_dilated_attention_cnn",
+        "dense_protein_residual_bilinear_cnn",
+    }:
+        raise ValueError(
+            "--pretrained-dna-checkpoint for dense_protein_residual_bilinear_cnn "
+            "must come from dense_motif_dilated_attention_cnn or another "
+            f"dense_protein_residual_bilinear_cnn checkpoint, got {checkpoint_model!r}"
+        )
+
+    checkpoint_input_channels = config.get("input_channels", saved_args.get("input_channels"))
+    if checkpoint_input_channels is not None and int(checkpoint_input_channels) != input_channels:
+        raise ValueError(
+            "Pretrained DNA checkpoint input channels do not match this run: "
+            f"checkpoint has {checkpoint_input_channels}, dataset has {input_channels}. "
+            "Use the same DNA input mode/embedding layer as the DNA-only checkpoint."
+        )
+
+    scalar_keys = (
+        ("hidden_channels", int),
+        ("kernel_size", int),
+        ("dropout", float),
+        ("dna_attention_window_bp", int),
+        ("dna_attention_layers", int),
+        ("dna_attention_heads", int),
+        ("dna_attention_ffn_multiplier", float),
+    )
+    sequence_keys = ("dilations", "motif_kernel_sizes")
+    applied: dict[str, object] = {}
+
+    for key, caster in scalar_keys:
+        value = config.get(key, saved_args.get(key))
+        if value is None:
+            continue
+        cast_value = caster(value)
+        setattr(args, key, cast_value)
+        applied[key] = cast_value
+
+    for key in sequence_keys:
+        value = config.get(key, saved_args.get(key))
+        if value is None:
+            continue
+        string_value = _stringify_int_sequence(value)
+        setattr(args, key, string_value)
+        applied[key] = string_value
+
+    if applied:
+        print(
+            "Aligned DNA branch architecture from pretrained checkpoint:",
+            {
+                "checkpoint": str(args.pretrained_dna_checkpoint),
+                "checkpoint_model": checkpoint_model,
+                **applied,
+            },
+        )
+
+
 def load_pretrained_dna_branch(
     model: torch.nn.Module,
     checkpoint_path: Path,
@@ -1445,7 +1545,6 @@ def main() -> None:
     args = parse_args()
     set_seed(args.seed)
     device = get_device(args.device)
-    dilations = parse_dilations(args.dilations)
 
     tf_name_filter = None
     if args.drop_missing_tf_embeddings or args.tf_name_filter_from_embeddings:
@@ -1505,6 +1604,8 @@ def main() -> None:
     val_tf_tensor = tensor_indices(val_tf_indices, device) if val_tf_indices else None
     test_tf_tensor = tensor_indices(test_tf_indices, device) if test_tf_indices else None
     input_channels = infer_input_channels(dataset, args.input_mode)
+    align_dna_branch_args_from_checkpoint(args, input_channels=input_channels)
+    dilations = parse_dilations(args.dilations)
     output_channels = 1 if args.label_mode == "merged_train_tfs" else len(dataset.tf_names)
     print("Dataset:", dataset.summary())
     print("Promoter split:", promoter_split["counts"])
