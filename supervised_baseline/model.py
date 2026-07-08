@@ -1495,6 +1495,138 @@ class DenseProteinDirectScorerCNN(nn.Module):
         return self.scorer(dna_features, protein_features)
 
 
+class DenseProteinWindowLocalizationCNN(DenseProteinDirectScorerCNN):
+    """Protein-conditioned window classifier with base-wise localization.
+
+    The localization head emits one TF-specific logit per base. A second head
+    scores whether the same TF binds anywhere in the supplied sequence window or
+    promoter. Both heads share the contextual DNA encoder and protein adapter,
+    so the window-level task can teach TF/DNA compatibility while the
+    localization head keeps position-level outputs available for BindingBench.
+    """
+
+    def __init__(
+        self,
+        n_tfs: int,
+        tf_embeddings: torch.Tensor,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 128,
+        motif_kernel_sizes: tuple[int, ...] = (21,),
+        kernel_size: int = 7,
+        dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+        dropout: float = 0.1,
+        dna_attention_window_bp: int = 50,
+        dna_attention_layers: int = 2,
+        dna_attention_heads: int = 8,
+        dna_attention_ffn_multiplier: float = 4.0,
+        tf_embedding_dropout: float = 0.0,
+        protein_noise_std: float = 0.0,
+        protein_l2_normalize: bool = False,
+        scorer: str = "multihead_bilinear",
+        scorer_heads: int = 8,
+        scorer_pair_dim: int = 32,
+        scorer_hidden_dim: int = 128,
+        scorer_bias_mode: str = "tf",
+    ) -> None:
+        super().__init__(
+            n_tfs=n_tfs,
+            tf_embeddings=tf_embeddings,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            motif_kernel_sizes=motif_kernel_sizes,
+            kernel_size=kernel_size,
+            dilations=dilations,
+            dropout=dropout,
+            dna_attention_window_bp=dna_attention_window_bp,
+            dna_attention_layers=dna_attention_layers,
+            dna_attention_heads=dna_attention_heads,
+            dna_attention_ffn_multiplier=dna_attention_ffn_multiplier,
+            tf_embedding_dropout=tf_embedding_dropout,
+            protein_noise_std=protein_noise_std,
+            protein_l2_normalize=protein_l2_normalize,
+            scorer=scorer,
+            scorer_heads=scorer_heads,
+            scorer_pair_dim=scorer_pair_dim,
+            scorer_hidden_dim=scorer_hidden_dim,
+            scorer_bias_mode=scorer_bias_mode,
+        )
+        self.window_dna_adapter = nn.Sequential(
+            nn.LayerNorm(hidden_channels * 2),
+            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+        )
+        if scorer == "multihead_bilinear":
+            self.window_scorer = MultiHeadBilinearScorer(
+                hidden_channels,
+                num_heads=scorer_heads,
+                head_dim=scorer_pair_dim,
+                dropout=dropout,
+                bias_mode=scorer_bias_mode,
+            )
+        else:
+            self.window_scorer = MLPInteractionScorer(
+                hidden_channels,
+                pair_dim=scorer_pair_dim,
+                scorer_hidden_dim=scorer_hidden_dim,
+                dropout=dropout,
+                bias_mode=scorer_bias_mode,
+            )
+
+    def train(self, mode: bool = True) -> "DenseProteinWindowLocalizationCNN":
+        super().train(mode)
+        if self.dna_frozen:
+            self.dna_model.eval()
+        return self
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        tf_indices: torch.Tensor | None = None,
+        pairwise_tf_indices: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        dna_features = self.dna_adapter(self.dna_model.encode(x))
+
+        if pairwise_tf_indices and (
+            tf_indices is None or tf_indices.ndim != 1 or tf_indices.shape[0] != x.shape[0]
+        ):
+            raise ValueError(
+                "pairwise_tf_indices=True requires tf_indices with shape [batch]"
+            )
+
+        protein_features = self._protein_features(tf_indices)
+        if pairwise_tf_indices:
+            localization_logits = self.scorer.forward_pairwise(
+                dna_features,
+                protein_features,
+            )
+        else:
+            localization_logits = self.scorer(dna_features, protein_features)
+
+        dna_mean = dna_features.mean(dim=1)
+        dna_max = dna_features.amax(dim=1)
+        window_dna = self.window_dna_adapter(torch.cat([dna_mean, dna_max], dim=-1))
+        window_tokens = window_dna.unsqueeze(1)
+        if pairwise_tf_indices:
+            window_logits = self.window_scorer.forward_pairwise(
+                window_tokens,
+                protein_features,
+            ).squeeze(-1)
+        else:
+            window_logits = self.window_scorer(
+                window_tokens,
+                protein_features,
+            ).squeeze(-1)
+        return {
+            "logits": localization_logits,
+            "window_logits": window_logits,
+        }
+
+
 class TransBindLite(nn.Module):
     """Protein-conditioned TF binding model.
 
@@ -1601,6 +1733,7 @@ DENSE_MODEL_NAMES = (
     "dense_motif_dilated_attention_cnn",
     "dense_protein_residual_bilinear_cnn",
     "dense_protein_direct_scorer_cnn",
+    "dense_protein_window_localization_cnn",
     "dense_protein_res_dilated_cnn",
     "dense_protein_local_attention",
     "dense_protein_motif_cnn",
@@ -1759,6 +1892,31 @@ def build_dense_model(
         if tf_embeddings is None:
             raise ValueError("dense_protein_direct_scorer_cnn requires tf_embeddings")
         return DenseProteinDirectScorerCNN(
+            n_tfs=n_tfs,
+            tf_embeddings=tf_embeddings,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            motif_kernel_sizes=motif_kernel_sizes,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            dilations=dilations,
+            dna_attention_window_bp=dna_attention_window_bp,
+            dna_attention_layers=dna_attention_layers,
+            dna_attention_heads=dna_attention_heads,
+            dna_attention_ffn_multiplier=dna_attention_ffn_multiplier,
+            tf_embedding_dropout=tf_embedding_dropout,
+            protein_noise_std=protein_noise_std,
+            protein_l2_normalize=protein_l2_normalize,
+            scorer=scorer,
+            scorer_heads=scorer_heads,
+            scorer_pair_dim=scorer_pair_dim,
+            scorer_hidden_dim=scorer_hidden_dim,
+            scorer_bias_mode=scorer_bias_mode,
+        )
+    if model_name == "dense_protein_window_localization_cnn":
+        if tf_embeddings is None:
+            raise ValueError("dense_protein_window_localization_cnn requires tf_embeddings")
+        return DenseProteinWindowLocalizationCNN(
             n_tfs=n_tfs,
             tf_embeddings=tf_embeddings,
             input_channels=input_channels,

@@ -55,6 +55,7 @@ PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_motif_cnn",
     "dense_protein_residual_bilinear_cnn",
     "dense_protein_direct_scorer_cnn",
+    "dense_protein_window_localization_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )
@@ -440,7 +441,8 @@ def score_batch(
     x = prepare_x(batch["x"].to(device, non_blocking=True), input_mode)
     mask = batch["mask"].detach().cpu().numpy().astype(bool, copy=False)
     with torch.no_grad():
-        logits = model(x)
+        outputs = model(x)
+        logits = outputs["logits"] if isinstance(outputs, dict) else outputs
         scores = logits.sigmoid() if score_mode == "sigmoid" else logits
     scores_np = scores.detach().cpu().numpy().astype(np.float32, copy=False)
     return np.transpose(scores_np, (0, 2, 1)), mask

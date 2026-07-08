@@ -56,6 +56,7 @@ LABEL_MODE="${LABEL_MODE:-tf}"
 LOSS="${LOSS:-bce}"
 FOCAL_GAMMA="${FOCAL_GAMMA:-2.0}"
 FOCAL_ALPHA="${FOCAL_ALPHA:-}"
+WINDOW_LOSS_WEIGHT="${WINDOW_LOSS_WEIGHT:-1.0}"
 TRAINING_WINDOW_MODE="${TRAINING_WINDOW_MODE:-full_promoter}"
 SAMPLED_WINDOW_SIZE="${SAMPLED_WINDOW_SIZE:-200}"
 SAMPLED_WINDOW_SAMPLES_PER_EPOCH="${SAMPLED_WINDOW_SAMPLES_PER_EPOCH:-50000}"
@@ -162,6 +163,7 @@ echo "Label mode:           ${LABEL_MODE}"
 echo "Loss:                 ${LOSS}"
 echo "Focal gamma:          ${FOCAL_GAMMA}"
 echo "Focal alpha:          ${FOCAL_ALPHA:-<none>}"
+echo "Window loss weight:   ${WINDOW_LOSS_WEIGHT}"
 echo "Training window mode: ${TRAINING_WINDOW_MODE}"
 echo "Sampled window size:  ${SAMPLED_WINDOW_SIZE}"
 echo "Samples per epoch:    ${SAMPLED_WINDOW_SAMPLES_PER_EPOCH}"
@@ -306,6 +308,7 @@ fi
     --label-mode "${LABEL_MODE}" \
     --loss "${LOSS}" \
     --focal-gamma "${FOCAL_GAMMA}" \
+    --window-loss-weight "${WINDOW_LOSS_WEIGHT}" \
     --training-window-mode "${TRAINING_WINDOW_MODE}" \
     --sampled-window-size "${SAMPLED_WINDOW_SIZE}" \
     --sampled-window-samples-per-epoch "${SAMPLED_WINDOW_SAMPLES_PER_EPOCH}" \

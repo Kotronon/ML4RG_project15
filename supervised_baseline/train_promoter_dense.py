@@ -84,6 +84,7 @@ PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_motif_cnn",
     "dense_protein_residual_bilinear_cnn",
     "dense_protein_direct_scorer_cnn",
+    "dense_protein_window_localization_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )
@@ -105,6 +106,18 @@ class DenseEpochStats:
     val_predicted_positive_rate: float | None = None
     val_average_precision: float | None = None
     val_roc_auc: float | None = None
+    window_loss: float | None = None
+    window_micro_precision: float | None = None
+    window_micro_recall: float | None = None
+    window_micro_f1: float | None = None
+    window_predicted_positive_rate: float | None = None
+    val_window_loss: float | None = None
+    val_window_micro_precision: float | None = None
+    val_window_micro_recall: float | None = None
+    val_window_micro_f1: float | None = None
+    val_window_predicted_positive_rate: float | None = None
+    val_window_average_precision: float | None = None
+    val_window_roc_auc: float | None = None
 
 
 @dataclass
@@ -118,6 +131,13 @@ class DenseSplitStats:
     average_precision: float | None = None
     roc_auc: float | None = None
     per_tf: list[dict[str, object]] | None = None
+    window_loss: float | None = None
+    window_micro_precision: float | None = None
+    window_micro_recall: float | None = None
+    window_micro_f1: float | None = None
+    window_predicted_positive_rate: float | None = None
+    window_average_precision: float | None = None
+    window_roc_auc: float | None = None
 
 
 LABEL_MODES = ("tf", "merged_train_tfs")
@@ -288,6 +308,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional focal alpha for positives. Leave unset to use only "
             "--pos-weight with focal modulation."
+        ),
+    )
+    parser.add_argument(
+        "--window-loss-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Loss weight for models that emit a window-level binding logit. "
+            "The dense localization loss keeps weight 1.0."
         ),
     )
     parser.add_argument(
@@ -555,6 +584,10 @@ def parse_args() -> argparse.Namespace:
             "val_average_precision",
             "val_roc_auc",
             "val_micro_f1",
+            "val_window_loss",
+            "val_window_average_precision",
+            "val_window_roc_auc",
+            "val_window_micro_f1",
             "train_loss",
         ),
         default="val_loss",
@@ -586,6 +619,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--focal-gamma must be non-negative")
     if args.focal_alpha is not None and not 0.0 <= args.focal_alpha <= 1.0:
         raise ValueError("--focal-alpha must be between 0 and 1")
+    if args.window_loss_weight < 0:
+        raise ValueError("--window-loss-weight must be non-negative")
     if args.training_window_mode == "sampled_windows" and args.label_mode != "tf":
         raise ValueError("--training-window-mode sampled_windows requires --label-mode tf")
     if args.sampled_window_size <= 0:
@@ -1065,6 +1100,35 @@ def dense_loss(
     raise ValueError(f"Unknown loss: {loss_name}")
 
 
+def split_dense_outputs(
+    outputs: torch.Tensor | dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if isinstance(outputs, dict):
+        if "logits" not in outputs:
+            raise ValueError("Model output dict must contain 'logits'")
+        return outputs["logits"], outputs.get("window_logits")
+    return outputs, None
+
+
+def window_targets_from_dense(
+    hard_targets: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    valid = mask.unsqueeze(1).expand_as(hard_targets)
+    return ((hard_targets >= 0.5) & valid).any(dim=-1).float()
+
+
+def window_bce_loss(
+    window_logits: torch.Tensor,
+    window_targets: torch.Tensor,
+) -> torch.Tensor:
+    return F.binary_cross_entropy_with_logits(
+        window_logits,
+        window_targets,
+        reduction="mean",
+    )
+
+
 def binary_average_precision(scores: np.ndarray, targets: np.ndarray) -> float | None:
     targets_bool = targets.astype(bool, copy=False)
     n_pos = int(targets_bool.sum())
@@ -1150,6 +1214,7 @@ def model_config_from_args(
         "loss": args.loss,
         "focal_gamma": args.focal_gamma,
         "focal_alpha": args.focal_alpha,
+        "window_loss_weight": args.window_loss_weight,
         "training_window_mode": args.training_window_mode,
         "sampled_window_size": args.sampled_window_size,
         "sampled_window_samples_per_epoch": args.sampled_window_samples_per_epoch,
@@ -1243,6 +1308,7 @@ def align_dna_branch_args_from_checkpoint(
     dna_branch_models = {
         "dense_protein_residual_bilinear_cnn",
         "dense_protein_direct_scorer_cnn",
+        "dense_protein_window_localization_cnn",
     }
     if args.model not in dna_branch_models or args.pretrained_dna_checkpoint is None:
         return
@@ -1259,6 +1325,7 @@ def align_dna_branch_args_from_checkpoint(
         "dense_motif_dilated_attention_cnn",
         "dense_protein_residual_bilinear_cnn",
         "dense_protein_direct_scorer_cnn",
+        "dense_protein_window_localization_cnn",
     }:
         raise ValueError(
             f"--pretrained-dna-checkpoint for {args.model} must come from "
@@ -1408,6 +1475,7 @@ def train_one_epoch(
     loss_name: str,
     focal_gamma: float,
     focal_alpha: float | None,
+    window_loss_weight: float,
     epoch: int,
 ) -> DenseEpochStats:
     model.train()
@@ -1416,6 +1484,11 @@ def train_one_epoch(
     tp = fp = fn = 0.0
     predicted_positive = 0.0
     total_labels = 0.0
+    window_loss_total = 0.0
+    window_batches = 0
+    window_tp = window_fp = window_fn = 0.0
+    window_predicted_positive = 0.0
+    window_total_labels = 0.0
 
     for batch in loader:
         x = prepare_x(batch["x"].to(device, non_blocking=True), input_mode)
@@ -1428,7 +1501,7 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
         if batch_tf_indices is not None:
-            logits = forward_dense_model(
+            outputs = forward_dense_model(
                 model,
                 x,
                 batch_tf_indices,
@@ -1439,7 +1512,7 @@ def train_one_epoch(
                 batch_tf_indices,
             )
         else:
-            logits = forward_dense_model(model, x, model_tf_indices)
+            outputs = forward_dense_model(model, x, model_tf_indices)
             y = make_dense_targets(
                 y,
                 label_mode=label_mode,
@@ -1457,13 +1530,14 @@ def train_one_epoch(
                 if pos_weight is not None and label_mode == "tf"
                 else pos_weight
             )
+        logits, window_logits = split_dense_outputs(outputs)
         if logits.shape != y.shape:
             raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
         if logits.shape != hard_y.shape:
             raise ValueError(
                 f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
             )
-        loss = dense_loss(
+        localization_loss = dense_loss(
             logits,
             y,
             mask,
@@ -1472,12 +1546,27 @@ def train_one_epoch(
             focal_gamma=focal_gamma,
             focal_alpha=focal_alpha,
         )
+        loss = localization_loss
+        window_targets = None
+        window_loss_value = None
+        if window_logits is not None:
+            window_targets = window_targets_from_dense(hard_y, mask)
+            if window_logits.shape != window_targets.shape:
+                raise ValueError(
+                    "Window logit/label shape mismatch: "
+                    f"{window_logits.shape} vs {window_targets.shape}"
+                )
+            window_loss_value = window_bce_loss(window_logits, window_targets)
+            loss = loss + window_loss_weight * window_loss_value
         loss.backward()
         optimizer.step()
 
         batch_size = x.shape[0]
         total_loss += float(loss.detach().cpu()) * batch_size
         total_examples += batch_size
+        if window_loss_value is not None:
+            window_loss_total += float(window_loss_value.detach().cpu()) * batch_size
+            window_batches += batch_size
 
         with torch.no_grad():
             valid = mask.unsqueeze(1).expand_as(logits)
@@ -1488,10 +1577,37 @@ def train_one_epoch(
             fn += (~pred & target & valid).sum().item()
             predicted_positive += (pred & valid).sum().item()
             total_labels += valid.sum().item()
+            if window_logits is not None and window_targets is not None:
+                window_pred = window_logits.sigmoid() >= 0.5
+                window_target = window_targets >= 0.5
+                window_tp += (window_pred & window_target).sum().item()
+                window_fp += (window_pred & ~window_target).sum().item()
+                window_fn += (~window_pred & window_target).sum().item()
+                window_predicted_positive += window_pred.sum().item()
+                window_total_labels += window_target.numel()
 
     precision = tp / (tp + fp) if (tp + fp) else 0.0
     recall = tp / (tp + fn) if (tp + fn) else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    window_precision = (
+        window_tp / (window_tp + window_fp)
+        if (window_tp + window_fp)
+        else None
+    )
+    window_recall = (
+        window_tp / (window_tp + window_fn)
+        if (window_tp + window_fn)
+        else None
+    )
+    window_f1 = (
+        2 * window_precision * window_recall / (window_precision + window_recall)
+        if (
+            window_precision is not None
+            and window_recall is not None
+            and (window_precision + window_recall)
+        )
+        else None
+    )
     return DenseEpochStats(
         epoch=epoch,
         train_loss=total_loss / max(total_examples, 1),
@@ -1500,6 +1616,19 @@ def train_one_epoch(
         micro_f1=f1,
         predicted_positive_rate=predicted_positive / max(total_labels, 1),
         lr=current_lr(optimizer),
+        window_loss=(
+            window_loss_total / max(window_batches, 1)
+            if window_batches
+            else None
+        ),
+        window_micro_precision=window_precision,
+        window_micro_recall=window_recall,
+        window_micro_f1=window_f1,
+        window_predicted_positive_rate=(
+            window_predicted_positive / max(window_total_labels, 1)
+            if window_total_labels
+            else None
+        ),
     )
 
 
@@ -1516,6 +1645,7 @@ def evaluate_dense(
     loss_name: str,
     focal_gamma: float,
     focal_alpha: float | None,
+    window_loss_weight: float,
     tf_names: list[str] | None = None,
     merged_label_name: str = "merged_train_tfs",
 ) -> DenseSplitStats:
@@ -1525,8 +1655,15 @@ def evaluate_dense(
     tp = fp = fn = 0.0
     predicted_positive = 0.0
     total_labels = 0.0
+    window_loss_total = 0.0
+    window_batches = 0
+    window_tp = window_fp = window_fn = 0.0
+    window_predicted_positive = 0.0
+    window_total_labels = 0.0
     micro_score_chunks: list[np.ndarray] = []
     micro_target_chunks: list[np.ndarray] = []
+    window_score_chunks: list[np.ndarray] = []
+    window_target_chunks: list[np.ndarray] = []
     per_tf_score_chunks: list[list[np.ndarray]] | None = None
     per_tf_target_chunks: list[list[np.ndarray]] | None = None
     selected_tf_names: list[str] | None = None
@@ -1555,7 +1692,7 @@ def evaluate_dense(
                 batch_tf_indices = batch_tf_indices.to(device, non_blocking=True)
 
             if batch_tf_indices is not None:
-                logits = forward_dense_model(
+                outputs = forward_dense_model(
                     model,
                     x,
                     batch_tf_indices,
@@ -1569,7 +1706,7 @@ def evaluate_dense(
                 per_tf_score_chunks = None
                 per_tf_target_chunks = None
             else:
-                logits = forward_dense_model(model, x, model_tf_indices)
+                outputs = forward_dense_model(model, x, model_tf_indices)
                 y = make_dense_targets(
                     y,
                     label_mode=label_mode,
@@ -1589,13 +1726,14 @@ def evaluate_dense(
                 )
                 if label_mode != "tf":
                     batch_pos_weight = pos_weight
+            logits, window_logits = split_dense_outputs(outputs)
             if logits.shape != y.shape:
                 raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
             if logits.shape != hard_y.shape:
                 raise ValueError(
                     f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
                 )
-            loss = dense_loss(
+            localization_loss = dense_loss(
                 logits,
                 y,
                 mask,
@@ -1604,10 +1742,25 @@ def evaluate_dense(
                 focal_gamma=focal_gamma,
                 focal_alpha=focal_alpha,
             )
+            loss = localization_loss
+            window_targets = None
+            window_loss_value = None
+            if window_logits is not None:
+                window_targets = window_targets_from_dense(hard_y, mask)
+                if window_logits.shape != window_targets.shape:
+                    raise ValueError(
+                        "Window logit/label shape mismatch: "
+                        f"{window_logits.shape} vs {window_targets.shape}"
+                    )
+                window_loss_value = window_bce_loss(window_logits, window_targets)
+                loss = loss + window_loss_weight * window_loss_value
 
             batch_size = x.shape[0]
             total_loss += float(loss.detach().cpu()) * batch_size
             total_examples += batch_size
+            if window_loss_value is not None:
+                window_loss_total += float(window_loss_value.detach().cpu()) * batch_size
+                window_batches += batch_size
 
             valid = mask.unsqueeze(1).expand_as(logits)
             pred = logits.sigmoid() >= 0.5
@@ -1623,6 +1776,20 @@ def evaluate_dense(
             valid_cpu = valid.detach().cpu().numpy()
             micro_score_chunks.append(logits_cpu[valid_cpu])
             micro_target_chunks.append(target_cpu[valid_cpu])
+            if window_logits is not None and window_targets is not None:
+                window_pred = window_logits.sigmoid() >= 0.5
+                window_target = window_targets >= 0.5
+                window_tp += (window_pred & window_target).sum().item()
+                window_fp += (window_pred & ~window_target).sum().item()
+                window_fn += (~window_pred & window_target).sum().item()
+                window_predicted_positive += window_pred.sum().item()
+                window_total_labels += window_target.numel()
+                window_score_chunks.append(
+                    window_logits.detach().cpu().numpy().reshape(-1)
+                )
+                window_target_chunks.append(
+                    window_target.detach().cpu().numpy().reshape(-1)
+                )
             if (
                 per_tf_score_chunks is not None
                 and per_tf_target_chunks is not None
@@ -1640,6 +1807,29 @@ def evaluate_dense(
     recall = tp / (tp + fn) if (tp + fn) else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
     average_precision, roc_auc = score_metrics(micro_score_chunks, micro_target_chunks)
+    window_precision = (
+        window_tp / (window_tp + window_fp)
+        if (window_tp + window_fp)
+        else None
+    )
+    window_recall = (
+        window_tp / (window_tp + window_fn)
+        if (window_tp + window_fn)
+        else None
+    )
+    window_f1 = (
+        2 * window_precision * window_recall / (window_precision + window_recall)
+        if (
+            window_precision is not None
+            and window_recall is not None
+            and (window_precision + window_recall)
+        )
+        else None
+    )
+    window_average_precision, window_roc_auc = score_metrics(
+        window_score_chunks,
+        window_target_chunks,
+    )
     per_tf_metrics = None
     if (
         selected_tf_names is not None
@@ -1674,6 +1864,21 @@ def evaluate_dense(
         average_precision=average_precision,
         roc_auc=roc_auc,
         per_tf=per_tf_metrics,
+        window_loss=(
+            window_loss_total / max(window_batches, 1)
+            if window_batches
+            else None
+        ),
+        window_micro_precision=window_precision,
+        window_micro_recall=window_recall,
+        window_micro_f1=window_f1,
+        window_predicted_positive_rate=(
+            window_predicted_positive / max(window_total_labels, 1)
+            if window_total_labels
+            else None
+        ),
+        window_average_precision=window_average_precision,
+        window_roc_auc=window_roc_auc,
     )
 
 
@@ -1685,6 +1890,15 @@ def attach_val_stats(stats: DenseEpochStats, val_stats: DenseSplitStats) -> Dens
     stats.val_predicted_positive_rate = val_stats.predicted_positive_rate
     stats.val_average_precision = val_stats.average_precision
     stats.val_roc_auc = val_stats.roc_auc
+    stats.val_window_loss = val_stats.window_loss
+    stats.val_window_micro_precision = val_stats.window_micro_precision
+    stats.val_window_micro_recall = val_stats.window_micro_recall
+    stats.val_window_micro_f1 = val_stats.window_micro_f1
+    stats.val_window_predicted_positive_rate = (
+        val_stats.window_predicted_positive_rate
+    )
+    stats.val_window_average_precision = val_stats.window_average_precision
+    stats.val_window_roc_auc = val_stats.window_roc_auc
     return stats
 
 
@@ -1976,6 +2190,7 @@ def main() -> None:
             loss_name=args.loss,
             focal_gamma=args.focal_gamma,
             focal_alpha=args.focal_alpha,
+            window_loss_weight=args.window_loss_weight,
             epoch=epoch,
         )
         if use_val_for_selection and (
@@ -1997,6 +2212,7 @@ def main() -> None:
                     loss_name=args.loss,
                     focal_gamma=args.focal_gamma,
                     focal_alpha=args.focal_alpha,
+                    window_loss_weight=args.window_loss_weight,
                     tf_names=dataset.tf_names,
                     merged_label_name=validation_merged_label_name,
                 ),
@@ -2020,6 +2236,12 @@ def main() -> None:
             f"pred_pos={stats.predicted_positive_rate:.5f} "
             f"lr={stats.lr:.6g}"
         )
+        if stats.window_loss is not None:
+            message += (
+                f" window_loss={stats.window_loss:.5f} "
+                f"window_f1={stats.window_micro_f1 or 0.0:.4f} "
+                f"window_pred_pos={stats.window_predicted_positive_rate or 0.0:.5f}"
+            )
         if stats.val_loss is not None:
             message += (
                 f" val_loss={stats.val_loss:.5f} "
@@ -2030,6 +2252,16 @@ def main() -> None:
                 message += f" val_ap={stats.val_average_precision:.4f}"
             if stats.val_roc_auc is not None:
                 message += f" val_roc_auc={stats.val_roc_auc:.4f}"
+            if stats.val_window_loss is not None:
+                message += (
+                    f" val_window_loss={stats.val_window_loss:.5f} "
+                    f"val_window_f1={stats.val_window_micro_f1 or 0.0:.4f} "
+                    f"val_window_pred_pos={stats.val_window_predicted_positive_rate or 0.0:.5f}"
+                )
+                if stats.val_window_average_precision is not None:
+                    message += f" val_window_ap={stats.val_window_average_precision:.4f}"
+                if stats.val_window_roc_auc is not None:
+                    message += f" val_window_roc_auc={stats.val_window_roc_auc:.4f}"
         print(message)
 
         save_json(args.output_dir / "history.json", history)
@@ -2238,6 +2470,7 @@ def main() -> None:
             loss_name=args.loss,
             focal_gamma=args.focal_gamma,
             focal_alpha=args.focal_alpha,
+            window_loss_weight=args.window_loss_weight,
             tf_names=dataset.tf_names,
             merged_label_name=merged_label_name,
         )
