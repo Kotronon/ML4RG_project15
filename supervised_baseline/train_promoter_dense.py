@@ -141,7 +141,7 @@ class DenseSplitStats:
 
 
 LABEL_MODES = ("tf", "merged_train_tfs")
-LOSS_NAMES = ("bce", "focal")
+LOSS_NAMES = ("bce", "focal", "rank")
 TRAINING_WINDOW_MODES = ("full_promoter", "sampled_windows")
 
 
@@ -308,6 +308,33 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional focal alpha for positives. Leave unset to use only "
             "--pos-weight with focal modulation."
+        ),
+    )
+    parser.add_argument(
+        "--rank-temperature",
+        type=float,
+        default=1.0,
+        help=(
+            "Softmax temperature for --loss rank. Lower values make the loss "
+            "focus harder on the highest-scoring candidate bases."
+        ),
+    )
+    parser.add_argument(
+        "--rank-negative-weight",
+        type=float,
+        default=0.1,
+        help=(
+            "Weight for the negative-only sampled-window penalty used by "
+            "--loss rank. Set to 0 to train only on windows containing positives."
+        ),
+    )
+    parser.add_argument(
+        "--rank-negative-top-k",
+        type=int,
+        default=10,
+        help=(
+            "Number of highest-scoring bases used for the negative-only "
+            "penalty in --loss rank."
         ),
     )
     parser.add_argument(
@@ -634,6 +661,12 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--focal-gamma must be non-negative")
     if args.focal_alpha is not None and not 0.0 <= args.focal_alpha <= 1.0:
         raise ValueError("--focal-alpha must be between 0 and 1")
+    if args.rank_temperature <= 0:
+        raise ValueError("--rank-temperature must be positive")
+    if args.rank_negative_weight < 0:
+        raise ValueError("--rank-negative-weight must be non-negative")
+    if args.rank_negative_top_k <= 0:
+        raise ValueError("--rank-negative-top-k must be positive")
     if args.window_loss_weight < 0:
         raise ValueError("--window-loss-weight must be non-negative")
     if args.window_pooling_top_k <= 0:
@@ -1093,6 +1126,49 @@ def dense_focal_loss(
     return loss[valid].mean()
 
 
+def dense_position_rank_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    temperature: float,
+    negative_weight: float,
+    negative_top_k: int,
+) -> torch.Tensor:
+    valid = mask.unsqueeze(1).expand_as(logits)
+    positives = (targets >= 0.5) & valid
+    has_valid = valid.any(dim=-1)
+    has_positive = positives.any(dim=-1)
+    scaled_logits = logits / temperature
+
+    positive_losses = []
+    if has_positive.any():
+        pos_logits = scaled_logits.masked_fill(~positives, -torch.inf)
+        all_logits = scaled_logits.masked_fill(~valid, -torch.inf)
+        pos_lse = torch.logsumexp(pos_logits, dim=-1)
+        all_lse = torch.logsumexp(all_logits, dim=-1)
+        positive_losses.append(-(pos_lse[has_positive] - all_lse[has_positive]))
+
+    losses = []
+    if positive_losses:
+        losses.append(torch.cat(positive_losses).mean())
+
+    has_negative_only = has_valid & ~has_positive
+    if negative_weight > 0 and has_negative_only.any():
+        negative_logits = logits.masked_fill(~valid, -torch.inf)[has_negative_only]
+        k = min(int(negative_top_k), int(negative_logits.shape[-1]))
+        top_logits = torch.topk(negative_logits, k=k, dim=-1).values
+        finite_top = torch.isfinite(top_logits)
+        top_logits = top_logits.masked_fill(~finite_top, -torch.inf)
+        top_counts = finite_top.sum(dim=-1).clamp_min(1).float()
+        pooled_logits = torch.logsumexp(top_logits, dim=-1) - top_counts.log()
+        losses.append(negative_weight * F.softplus(pooled_logits).mean())
+
+    if not losses:
+        return logits.sum() * 0.0
+    return torch.stack(losses).sum()
+
+
 def dense_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -1102,6 +1178,9 @@ def dense_loss(
     loss_name: str,
     focal_gamma: float,
     focal_alpha: float | None,
+    rank_temperature: float,
+    rank_negative_weight: float,
+    rank_negative_top_k: int,
 ) -> torch.Tensor:
     if loss_name == "bce":
         return dense_bce_loss(logits, targets, mask, pos_weight)
@@ -1113,6 +1192,15 @@ def dense_loss(
             pos_weight,
             gamma=focal_gamma,
             alpha=focal_alpha,
+        )
+    if loss_name == "rank":
+        return dense_position_rank_loss(
+            logits,
+            targets,
+            mask,
+            temperature=rank_temperature,
+            negative_weight=rank_negative_weight,
+            negative_top_k=rank_negative_top_k,
         )
     raise ValueError(f"Unknown loss: {loss_name}")
 
@@ -1231,6 +1319,9 @@ def model_config_from_args(
         "loss": args.loss,
         "focal_gamma": args.focal_gamma,
         "focal_alpha": args.focal_alpha,
+        "rank_temperature": args.rank_temperature,
+        "rank_negative_weight": args.rank_negative_weight,
+        "rank_negative_top_k": args.rank_negative_top_k,
         "window_loss_weight": args.window_loss_weight,
         "window_pooling": args.window_pooling,
         "window_pooling_top_k": args.window_pooling_top_k,
@@ -1494,6 +1585,9 @@ def train_one_epoch(
     loss_name: str,
     focal_gamma: float,
     focal_alpha: float | None,
+    rank_temperature: float,
+    rank_negative_weight: float,
+    rank_negative_top_k: int,
     window_loss_weight: float,
     epoch: int,
 ) -> DenseEpochStats:
@@ -1556,14 +1650,18 @@ def train_one_epoch(
             raise ValueError(
                 f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
             )
+        loss_targets = hard_y if loss_name == "rank" else y
         localization_loss = dense_loss(
             logits,
-            y,
+            loss_targets,
             mask,
             batch_pos_weight,
             loss_name=loss_name,
             focal_gamma=focal_gamma,
             focal_alpha=focal_alpha,
+            rank_temperature=rank_temperature,
+            rank_negative_weight=rank_negative_weight,
+            rank_negative_top_k=rank_negative_top_k,
         )
         loss = localization_loss
         window_targets = None
@@ -1664,6 +1762,9 @@ def evaluate_dense(
     loss_name: str,
     focal_gamma: float,
     focal_alpha: float | None,
+    rank_temperature: float,
+    rank_negative_weight: float,
+    rank_negative_top_k: int,
     window_loss_weight: float,
     tf_names: list[str] | None = None,
     merged_label_name: str = "merged_train_tfs",
@@ -1752,14 +1853,18 @@ def evaluate_dense(
                 raise ValueError(
                     f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
                 )
+            loss_targets = hard_y if loss_name == "rank" else y
             localization_loss = dense_loss(
                 logits,
-                y,
+                loss_targets,
                 mask,
                 batch_pos_weight,
                 loss_name=loss_name,
                 focal_gamma=focal_gamma,
                 focal_alpha=focal_alpha,
+                rank_temperature=rank_temperature,
+                rank_negative_weight=rank_negative_weight,
+                rank_negative_top_k=rank_negative_top_k,
             )
             loss = localization_loss
             window_targets = None
@@ -2211,6 +2316,9 @@ def main() -> None:
             loss_name=args.loss,
             focal_gamma=args.focal_gamma,
             focal_alpha=args.focal_alpha,
+            rank_temperature=args.rank_temperature,
+            rank_negative_weight=args.rank_negative_weight,
+            rank_negative_top_k=args.rank_negative_top_k,
             window_loss_weight=args.window_loss_weight,
             epoch=epoch,
         )
@@ -2233,6 +2341,9 @@ def main() -> None:
                     loss_name=args.loss,
                     focal_gamma=args.focal_gamma,
                     focal_alpha=args.focal_alpha,
+                    rank_temperature=args.rank_temperature,
+                    rank_negative_weight=args.rank_negative_weight,
+                    rank_negative_top_k=args.rank_negative_top_k,
                     window_loss_weight=args.window_loss_weight,
                     tf_names=dataset.tf_names,
                     merged_label_name=validation_merged_label_name,
@@ -2491,6 +2602,9 @@ def main() -> None:
             loss_name=args.loss,
             focal_gamma=args.focal_gamma,
             focal_alpha=args.focal_alpha,
+            rank_temperature=args.rank_temperature,
+            rank_negative_weight=args.rank_negative_weight,
+            rank_negative_top_k=args.rank_negative_top_k,
             window_loss_weight=args.window_loss_weight,
             tf_names=dataset.tf_names,
             merged_label_name=merged_label_name,

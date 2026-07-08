@@ -56,6 +56,9 @@ LABEL_MODE="${LABEL_MODE:-tf}"
 LOSS="${LOSS:-bce}"
 FOCAL_GAMMA="${FOCAL_GAMMA:-2.0}"
 FOCAL_ALPHA="${FOCAL_ALPHA:-}"
+RANK_TEMPERATURE="${RANK_TEMPERATURE:-1.0}"
+RANK_NEGATIVE_WEIGHT="${RANK_NEGATIVE_WEIGHT:-0.1}"
+RANK_NEGATIVE_TOP_K="${RANK_NEGATIVE_TOP_K:-10}"
 WINDOW_LOSS_WEIGHT="${WINDOW_LOSS_WEIGHT:-1.0}"
 WINDOW_POOLING="${WINDOW_POOLING:-topk_logmeanexp}"
 WINDOW_POOLING_TOP_K="${WINDOW_POOLING_TOP_K:-10}"
@@ -165,6 +168,9 @@ echo "Label mode:           ${LABEL_MODE}"
 echo "Loss:                 ${LOSS}"
 echo "Focal gamma:          ${FOCAL_GAMMA}"
 echo "Focal alpha:          ${FOCAL_ALPHA:-<none>}"
+echo "Rank temperature:     ${RANK_TEMPERATURE}"
+echo "Rank neg weight:      ${RANK_NEGATIVE_WEIGHT}"
+echo "Rank neg top-k:       ${RANK_NEGATIVE_TOP_K}"
 echo "Window loss weight:   ${WINDOW_LOSS_WEIGHT}"
 echo "Window pooling:       ${WINDOW_POOLING}"
 echo "Window pooling top-k: ${WINDOW_POOLING_TOP_K}"
@@ -312,6 +318,9 @@ fi
     --label-mode "${LABEL_MODE}" \
     --loss "${LOSS}" \
     --focal-gamma "${FOCAL_GAMMA}" \
+    --rank-temperature "${RANK_TEMPERATURE}" \
+    --rank-negative-weight "${RANK_NEGATIVE_WEIGHT}" \
+    --rank-negative-top-k "${RANK_NEGATIVE_TOP_K}" \
     --window-loss-weight "${WINDOW_LOSS_WEIGHT}" \
     --window-pooling "${WINDOW_POOLING}" \
     --window-pooling-top-k "${WINDOW_POOLING_TOP_K}" \
