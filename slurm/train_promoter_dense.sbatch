@@ -57,6 +57,8 @@ LOSS="${LOSS:-bce}"
 FOCAL_GAMMA="${FOCAL_GAMMA:-2.0}"
 FOCAL_ALPHA="${FOCAL_ALPHA:-}"
 WINDOW_LOSS_WEIGHT="${WINDOW_LOSS_WEIGHT:-1.0}"
+WINDOW_POOLING="${WINDOW_POOLING:-topk_logmeanexp}"
+WINDOW_POOLING_TOP_K="${WINDOW_POOLING_TOP_K:-10}"
 TRAINING_WINDOW_MODE="${TRAINING_WINDOW_MODE:-full_promoter}"
 SAMPLED_WINDOW_SIZE="${SAMPLED_WINDOW_SIZE:-200}"
 SAMPLED_WINDOW_SAMPLES_PER_EPOCH="${SAMPLED_WINDOW_SAMPLES_PER_EPOCH:-50000}"
@@ -164,6 +166,8 @@ echo "Loss:                 ${LOSS}"
 echo "Focal gamma:          ${FOCAL_GAMMA}"
 echo "Focal alpha:          ${FOCAL_ALPHA:-<none>}"
 echo "Window loss weight:   ${WINDOW_LOSS_WEIGHT}"
+echo "Window pooling:       ${WINDOW_POOLING}"
+echo "Window pooling top-k: ${WINDOW_POOLING_TOP_K}"
 echo "Training window mode: ${TRAINING_WINDOW_MODE}"
 echo "Sampled window size:  ${SAMPLED_WINDOW_SIZE}"
 echo "Samples per epoch:    ${SAMPLED_WINDOW_SAMPLES_PER_EPOCH}"
@@ -309,6 +313,8 @@ fi
     --loss "${LOSS}" \
     --focal-gamma "${FOCAL_GAMMA}" \
     --window-loss-weight "${WINDOW_LOSS_WEIGHT}" \
+    --window-pooling "${WINDOW_POOLING}" \
+    --window-pooling-top-k "${WINDOW_POOLING_TOP_K}" \
     --training-window-mode "${TRAINING_WINDOW_MODE}" \
     --sampled-window-size "${SAMPLED_WINDOW_SIZE}" \
     --sampled-window-samples-per-epoch "${SAMPLED_WINDOW_SAMPLES_PER_EPOCH}" \

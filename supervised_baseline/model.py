@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1496,13 +1498,13 @@ class DenseProteinDirectScorerCNN(nn.Module):
 
 
 class DenseProteinWindowLocalizationCNN(DenseProteinDirectScorerCNN):
-    """Protein-conditioned window classifier with base-wise localization.
+    """Protein-conditioned localization model with coupled window evidence.
 
     The localization head emits one TF-specific logit per base. A second head
-    scores whether the same TF binds anywhere in the supplied sequence window or
-    promoter. Both heads share the contextual DNA encoder and protein adapter,
-    so the window-level task can teach TF/DNA compatibility while the
-    localization head keeps position-level outputs available for BindingBench.
+    is not learned independently; instead it pools the base logits into a
+    differentiable window-level logit. This makes the window-level task teach
+    the position-level scorer rather than letting a separate classifier solve a
+    coarser task on its own.
     """
 
     def __init__(
@@ -1528,6 +1530,8 @@ class DenseProteinWindowLocalizationCNN(DenseProteinDirectScorerCNN):
         scorer_pair_dim: int = 32,
         scorer_hidden_dim: int = 128,
         scorer_bias_mode: str = "tf",
+        window_pooling: str = "topk_logmeanexp",
+        window_pooling_top_k: int = 10,
     ) -> None:
         super().__init__(
             n_tfs=n_tfs,
@@ -1551,30 +1555,14 @@ class DenseProteinWindowLocalizationCNN(DenseProteinDirectScorerCNN):
             scorer_hidden_dim=scorer_hidden_dim,
             scorer_bias_mode=scorer_bias_mode,
         )
-        self.window_dna_adapter = nn.Sequential(
-            nn.LayerNorm(hidden_channels * 2),
-            nn.Linear(hidden_channels * 2, hidden_channels),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_channels, hidden_channels),
-            nn.LayerNorm(hidden_channels),
-        )
-        if scorer == "multihead_bilinear":
-            self.window_scorer = MultiHeadBilinearScorer(
-                hidden_channels,
-                num_heads=scorer_heads,
-                head_dim=scorer_pair_dim,
-                dropout=dropout,
-                bias_mode=scorer_bias_mode,
+        if window_pooling not in {"max", "logsumexp", "topk_logmeanexp"}:
+            raise ValueError(
+                "window_pooling must be one of max, logsumexp, topk_logmeanexp"
             )
-        else:
-            self.window_scorer = MLPInteractionScorer(
-                hidden_channels,
-                pair_dim=scorer_pair_dim,
-                scorer_hidden_dim=scorer_hidden_dim,
-                dropout=dropout,
-                bias_mode=scorer_bias_mode,
-            )
+        if window_pooling_top_k <= 0:
+            raise ValueError("window_pooling_top_k must be positive")
+        self.window_pooling = window_pooling
+        self.window_pooling_top_k = int(window_pooling_top_k)
 
     def train(self, mode: bool = True) -> "DenseProteinWindowLocalizationCNN":
         super().train(mode)
@@ -1607,24 +1595,20 @@ class DenseProteinWindowLocalizationCNN(DenseProteinDirectScorerCNN):
         else:
             localization_logits = self.scorer(dna_features, protein_features)
 
-        dna_mean = dna_features.mean(dim=1)
-        dna_max = dna_features.amax(dim=1)
-        window_dna = self.window_dna_adapter(torch.cat([dna_mean, dna_max], dim=-1))
-        window_tokens = window_dna.unsqueeze(1)
-        if pairwise_tf_indices:
-            window_logits = self.window_scorer.forward_pairwise(
-                window_tokens,
-                protein_features,
-            ).squeeze(-1)
-        else:
-            window_logits = self.window_scorer(
-                window_tokens,
-                protein_features,
-            ).squeeze(-1)
         return {
             "logits": localization_logits,
-            "window_logits": window_logits,
+            "window_logits": self._pool_window_logits(localization_logits),
         }
+
+    def _pool_window_logits(self, localization_logits: torch.Tensor) -> torch.Tensor:
+        if self.window_pooling == "max":
+            return localization_logits.amax(dim=-1)
+        if self.window_pooling == "logsumexp":
+            return torch.logsumexp(localization_logits, dim=-1)
+
+        k = min(self.window_pooling_top_k, localization_logits.shape[-1])
+        top_logits = localization_logits.topk(k, dim=-1).values
+        return torch.logsumexp(top_logits, dim=-1) - math.log(k)
 
 
 class TransBindLite(nn.Module):
@@ -1828,6 +1812,8 @@ def build_dense_model(
     scorer_pair_dim: int = 32,
     scorer_hidden_dim: int = 128,
     scorer_bias_mode: str = "tf",
+    window_pooling: str = "topk_logmeanexp",
+    window_pooling_top_k: int = 10,
 ) -> nn.Module:
     if model_name == "dense_small_cnn":
         return DenseSmallCNN(
@@ -1937,6 +1923,8 @@ def build_dense_model(
             scorer_pair_dim=scorer_pair_dim,
             scorer_hidden_dim=scorer_hidden_dim,
             scorer_bias_mode=scorer_bias_mode,
+            window_pooling=window_pooling,
+            window_pooling_top_k=window_pooling_top_k,
         )
     if model_name == "dense_protein_res_dilated_cnn":
         if tf_embeddings is None:

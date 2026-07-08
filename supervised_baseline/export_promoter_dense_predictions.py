@@ -277,6 +277,18 @@ def resolve_export_config(
     scorer_bias_mode = str(
         saved_config.get("scorer_bias_mode", saved_args.get("scorer_bias_mode", "tf"))
     )
+    window_pooling = str(
+        saved_config.get(
+            "window_pooling",
+            saved_args.get("window_pooling", "topk_logmeanexp"),
+        )
+    )
+    window_pooling_top_k = int(
+        saved_config.get(
+            "window_pooling_top_k",
+            saved_args.get("window_pooling_top_k", 10),
+        )
+    )
 
     sites_path = args.sites_path or arg_path(saved_args.get("sites_path"), DEFAULT_SITES_PATH)
     regions_path = args.regions_path or arg_path(saved_args.get("regions_path"), DEFAULT_REGIONS_PATH)
@@ -368,6 +380,8 @@ def resolve_export_config(
         "scorer_pair_dim": scorer_pair_dim,
         "scorer_hidden_dim": scorer_hidden_dim,
         "scorer_bias_mode": scorer_bias_mode,
+        "window_pooling": window_pooling,
+        "window_pooling_top_k": window_pooling_top_k,
         "sites_path": sites_path,
         "regions_path": regions_path,
         "embeddings_path": embeddings_path,
@@ -706,6 +720,8 @@ def main() -> None:
         scorer_pair_dim=int(config["scorer_pair_dim"]),
         scorer_hidden_dim=int(config["scorer_hidden_dim"]),
         scorer_bias_mode=str(config["scorer_bias_mode"]),
+        window_pooling=str(config["window_pooling"]),
+        window_pooling_top_k=int(config["window_pooling_top_k"]),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()

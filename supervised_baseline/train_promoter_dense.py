@@ -320,6 +320,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--window-pooling",
+        choices=("max", "logsumexp", "topk_logmeanexp"),
+        default="topk_logmeanexp",
+        help=(
+            "How models with coupled window logits pool base-wise localization "
+            "logits into a window-level binding logit."
+        ),
+    )
+    parser.add_argument(
+        "--window-pooling-top-k",
+        type=int,
+        default=10,
+        help="Number of highest base logits used by --window-pooling topk_logmeanexp.",
+    )
+    parser.add_argument(
         "--training-window-mode",
         choices=TRAINING_WINDOW_MODES,
         default="full_promoter",
@@ -621,6 +636,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--focal-alpha must be between 0 and 1")
     if args.window_loss_weight < 0:
         raise ValueError("--window-loss-weight must be non-negative")
+    if args.window_pooling_top_k <= 0:
+        raise ValueError("--window-pooling-top-k must be positive")
     if args.training_window_mode == "sampled_windows" and args.label_mode != "tf":
         raise ValueError("--training-window-mode sampled_windows requires --label-mode tf")
     if args.sampled_window_size <= 0:
@@ -1215,6 +1232,8 @@ def model_config_from_args(
         "focal_gamma": args.focal_gamma,
         "focal_alpha": args.focal_alpha,
         "window_loss_weight": args.window_loss_weight,
+        "window_pooling": args.window_pooling,
+        "window_pooling_top_k": args.window_pooling_top_k,
         "training_window_mode": args.training_window_mode,
         "sampled_window_size": args.sampled_window_size,
         "sampled_window_samples_per_epoch": args.sampled_window_samples_per_epoch,
@@ -2074,6 +2093,8 @@ def main() -> None:
         scorer_pair_dim=args.scorer_pair_dim,
         scorer_hidden_dim=args.scorer_hidden_dim,
         scorer_bias_mode=args.scorer_bias_mode,
+        window_pooling=args.window_pooling,
+        window_pooling_top_k=args.window_pooling_top_k,
     ).to(device)
 
     if args.pretrained_dna_checkpoint is not None:
