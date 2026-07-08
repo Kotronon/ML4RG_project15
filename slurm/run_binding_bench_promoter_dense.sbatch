@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=bb-supervised
+#SBATCH --job-name=bb-prom-dense
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=12G
+#SBATCH --mem=32G
 #SBATCH --time=08:00:00
 #SBATCH --partition=student_project
 #SBATCH --gres=gpu:1
-#SBATCH --output=slurm/logs/binding-bench-supervised-%j.out
-#SBATCH --error=slurm/logs/binding-bench-supervised-%j.err
+#SBATCH --output=slurm/logs/binding-bench-promoter-dense-%j.out
+#SBATCH --error=slurm/logs/binding-bench-promoter-dense-%j.err
 
 set -euo pipefail
 
@@ -15,59 +15,63 @@ PYTHON_BIN="${PYTHON_BIN:-/opt/modules/i12g/anaconda/envs/ml4rg_project15/bin/py
 TARGET_DATASET="${TARGET_DATASET:-DNA_rossi_chipexo}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "${REPO_DIR:-}" ]]; then
-    if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/supervised_baseline/export_binding_bench_predictions.py" ]]; then
+    if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/supervised_baseline/export_promoter_dense_predictions.py" ]]; then
         REPO_DIR="${SLURM_SUBMIT_DIR}"
     else
         REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
     fi
 fi
 
-EXPORT_SCRIPT="${EXPORT_SCRIPT:-${REPO_DIR}/supervised_baseline/export_binding_bench_predictions.py}"
+EXPORT_SCRIPT="${EXPORT_SCRIPT:-${REPO_DIR}/supervised_baseline/export_promoter_dense_predictions.py}"
 BINDING_BENCH_REPO="${BINDING_BENCH_REPO:-${HOME}/binding_bench}"
 BINDING_BENCH_BIN="${BINDING_BENCH_BIN:-binding_bench}"
 
-MODEL="${MODEL:-small_cnn}"
-MODEL_DIR="${MODEL_DIR:-${PROJECT}/working/supervised_baseline/models/${MODEL}_overfit}"
+INPUT_MODE="${INPUT_MODE:-raw}"
+MODEL="${MODEL:-dense_small_cnn}"
+MODEL_DIR="${MODEL_DIR:-${PROJECT}/working/supervised_baseline/models/promoter_${INPUT_MODE}_${MODEL}}"
 CHECKPOINT="${CHECKPOINT:-${MODEL_DIR}/best.pt}"
-REGIONS_PATH="${REGIONS_PATH:-/s/project/multispecies/fungi_code/tf_sae/processed/sequence_datasets/fungi_upstream_ATG_1000/_saccharomyces_cerevisiae_sequence_mapper.parquet}"
 
-NMS_RADIUS_BP="${NMS_RADIUS_BP:-50}"
+NMS_RADIUS_BP="${NMS_RADIUS_BP:-0}"
 PEAK_CALLER="${PEAK_CALLER:-nms}"
 PRE_NMS_FACTOR="${PRE_NMS_FACTOR:-20}"
 SCORE_MODE="${SCORE_MODE:-logit}"
 FEATURE_RANK_METHOD="${FEATURE_RANK_METHOD:-max-score}"
 FEATURE_RANK_NAME="${FEATURE_RANK_NAME:-model_score}"
-METHOD_NAME="${METHOD_NAME:-supervised_${MODEL}_${SCORE_MODE}_nms${NMS_RADIUS_BP}}"
-DISPLAY_NAME="${DISPLAY_NAME:-Supervised ${MODEL} (${SCORE_MODE})}"
+FEATURE_NAME_FILTER_PATH="${FEATURE_NAME_FILTER_PATH:-}"
+TARGET_NAME_FILTER_PATH="${TARGET_NAME_FILTER_PATH:-}"
+METHOD_NAME="${METHOD_NAME:-promoter_${INPUT_MODE}_${MODEL}_${SCORE_MODE}_nms${NMS_RADIUS_BP}}"
+DISPLAY_NAME="${DISPLAY_NAME:-Promoter ${INPUT_MODE} ${MODEL} (${SCORE_MODE}, nms=${NMS_RADIUS_BP})}"
 INPUT_DIR="${PROJECT}/working/binding_bench_inputs"
-RUN_DIR="${PROJECT}/working/binding_bench_runs/${METHOD_NAME}"
+RUN_DIR="${RUN_DIR:-${PROJECT}/working/binding_bench_reports/${METHOD_NAME}}"
 PREDICTIONS="${PREDICTIONS:-${INPUT_DIR}/${METHOD_NAME}_predictions.parquet}"
 FEATURE_RANKS="${FEATURE_RANKS:-${INPUT_DIR}/${METHOD_NAME}_feature_ranks.parquet}"
 
-WINDOW_SIZE="${WINDOW_SIZE:-}"
-SEQUENCE_ORIENTATION="${SEQUENCE_ORIENTATION:-}"
-SCAN_STRIDE="${SCAN_STRIDE:-1}"
 TOP_K_PER_TF="${TOP_K_PER_TF:-5000}"
-EXPORT_BATCH_SIZE="${EXPORT_BATCH_SIZE:-8192}"
+EXPORT_BATCH_SIZE="${EXPORT_BATCH_SIZE:-16}"
+NUM_WORKERS="${NUM_WORKERS:-0}"
 DEVICE="${DEVICE:-auto}"
-INFERENCE_TF_NAMES="${INFERENCE_TF_NAMES:-}"
-INFERENCE_TF_NAMES_PATH="${INFERENCE_TF_NAMES_PATH:-}"
-INFERENCE_TF_EMBEDDINGS_PATH="${INFERENCE_TF_EMBEDDINGS_PATH:-}"
+SITES_PATH="${SITES_PATH:-}"
+REGIONS_PATH="${REGIONS_PATH:-}"
+EMBEDDINGS_PATH="${EMBEDDINGS_PATH:-}"
+EMBEDDING_COLUMN="${EMBEDDING_COLUMN:-}"
+EMBEDDING_KEY_COLUMN="${EMBEDDING_KEY_COLUMN:-}"
+SEQUENCE_ORIENTATION="${SEQUENCE_ORIENTATION:-}"
+INCLUDE_TERMINAL_ATG="${INCLUDE_TERMINAL_ATG:-false}"
+MAX_REGIONS="${MAX_REGIONS:-}"
 EXTRA_EXPORT_ARGS="${EXTRA_EXPORT_ARGS:-}"
 
 mkdir -p "${INPUT_DIR}" "${RUN_DIR}" "${REPO_DIR}/slurm/logs"
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "Python executable not found: ${PYTHON_BIN}" >&2
-    echo "Set PYTHON_BIN to the full Python path from the ml4rg_project15 environment." >&2
     exit 127
 fi
 
 CONDA_PREFIX="$(${PYTHON_BIN} -c 'import sys; print(sys.prefix)')"
 export PATH="${CONDA_PREFIX}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-32}"
-export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-32}"
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
+export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
 export PYTHONUNBUFFERED=1
 
 echo "Project:              ${PROJECT}"
@@ -75,63 +79,72 @@ echo "Repo dir:             ${REPO_DIR}"
 echo "Export script:        ${EXPORT_SCRIPT}"
 echo "Python:               $(${PYTHON_BIN} -c 'import sys; print(sys.executable)')"
 echo "Conda prefix:         ${CONDA_PREFIX}"
+echo "Input mode:           ${INPUT_MODE}"
 echo "Model:                ${MODEL}"
 echo "Checkpoint:           ${CHECKPOINT}"
-echo "Regions:              ${REGIONS_PATH}"
 echo "Predictions:          ${PREDICTIONS}"
 echo "Feature ranks:        ${FEATURE_RANKS}"
 echo "Run dir:              ${RUN_DIR}"
 echo "Target dataset:       ${TARGET_DATASET}"
-echo "Scan stride:          ${SCAN_STRIDE}"
 echo "Top K per TF:         ${TOP_K_PER_TF}"
 echo "NMS radius bp:        ${NMS_RADIUS_BP}"
 echo "Peak caller:          ${PEAK_CALLER}"
 echo "Pre-NMS factor:       ${PRE_NMS_FACTOR}"
 echo "Score mode:           ${SCORE_MODE}"
 echo "Feature rank method:  ${FEATURE_RANK_METHOD}"
+echo "Feature name filter:  ${FEATURE_NAME_FILTER_PATH:-<none>}"
+echo "Target name filter:   ${TARGET_NAME_FILTER_PATH:-<none>}"
 echo "Device:               ${DEVICE}"
-echo "Inference TF names:   ${INFERENCE_TF_NAMES:-<checkpoint>}"
-echo "Inference TF file:    ${INFERENCE_TF_NAMES_PATH:-<none>}"
-echo "Inference TF emb:     ${INFERENCE_TF_EMBEDDINGS_PATH:-<checkpoint>}"
 
-WINDOW_ARG=()
-if [[ -n "${WINDOW_SIZE}" ]]; then
-    WINDOW_ARG=(--window-size "${WINDOW_SIZE}")
+OPTIONAL_ARGS=()
+if [[ -n "${SITES_PATH}" ]]; then
+    OPTIONAL_ARGS+=(--sites-path "${SITES_PATH}")
 fi
-
-ORIENTATION_ARG=()
+if [[ -n "${REGIONS_PATH}" ]]; then
+    OPTIONAL_ARGS+=(--regions-path "${REGIONS_PATH}")
+fi
+if [[ -n "${EMBEDDINGS_PATH}" ]]; then
+    OPTIONAL_ARGS+=(--embeddings-path "${EMBEDDINGS_PATH}")
+fi
+if [[ -n "${EMBEDDING_COLUMN}" ]]; then
+    OPTIONAL_ARGS+=(--embedding-column "${EMBEDDING_COLUMN}")
+fi
+if [[ -n "${EMBEDDING_KEY_COLUMN}" ]]; then
+    OPTIONAL_ARGS+=(--embedding-key-column "${EMBEDDING_KEY_COLUMN}")
+fi
 if [[ -n "${SEQUENCE_ORIENTATION}" ]]; then
-    ORIENTATION_ARG=(--sequence-orientation "${SEQUENCE_ORIENTATION}")
+    OPTIONAL_ARGS+=(--sequence-orientation "${SEQUENCE_ORIENTATION}")
+fi
+if [[ "${INCLUDE_TERMINAL_ATG}" == "true" ]]; then
+    OPTIONAL_ARGS+=(--include-terminal-atg)
+fi
+if [[ -n "${MAX_REGIONS}" ]]; then
+    OPTIONAL_ARGS+=(--max-regions "${MAX_REGIONS}")
 fi
 
-INFERENCE_ARG=()
-if [[ -n "${INFERENCE_TF_NAMES}" ]]; then
-    INFERENCE_ARG+=(--inference-tf-names "${INFERENCE_TF_NAMES}")
+BINDING_BENCH_FILTER_ARGS=()
+if [[ -n "${FEATURE_NAME_FILTER_PATH}" ]]; then
+    BINDING_BENCH_FILTER_ARGS+=(--feature_name_filter_path "${FEATURE_NAME_FILTER_PATH}")
 fi
-if [[ -n "${INFERENCE_TF_NAMES_PATH}" ]]; then
-    INFERENCE_ARG+=(--inference-tf-names-path "${INFERENCE_TF_NAMES_PATH}")
-fi
-if [[ -n "${INFERENCE_TF_EMBEDDINGS_PATH}" ]]; then
-    INFERENCE_ARG+=(--inference-tf-embeddings-path "${INFERENCE_TF_EMBEDDINGS_PATH}")
+if [[ -n "${TARGET_NAME_FILTER_PATH}" ]]; then
+    BINDING_BENCH_FILTER_ARGS+=(--target_name_filter_path "${TARGET_NAME_FILTER_PATH}")
 fi
 
 "${PYTHON_BIN}" "${EXPORT_SCRIPT}" \
     --checkpoint "${CHECKPOINT}" \
-    --regions-path "${REGIONS_PATH}" \
+    --input-mode "${INPUT_MODE}" \
     --predictions-out "${PREDICTIONS}" \
     --feature-ranks-out "${FEATURE_RANKS}" \
-    --scan-stride "${SCAN_STRIDE}" \
     --top-k-per-tf "${TOP_K_PER_TF}" \
     --nms-radius-bp "${NMS_RADIUS_BP}" \
     --peak-caller "${PEAK_CALLER}" \
     --pre-nms-factor "${PRE_NMS_FACTOR}" \
     --batch-size "${EXPORT_BATCH_SIZE}" \
+    --num-workers "${NUM_WORKERS}" \
     --device "${DEVICE}" \
     --score-mode "${SCORE_MODE}" \
     --feature-rank-method "${FEATURE_RANK_METHOD}" \
-    "${WINDOW_ARG[@]}" \
-    "${ORIENTATION_ARG[@]}" \
-    "${INFERENCE_ARG[@]}" \
+    "${OPTIONAL_ARGS[@]}" \
     ${EXTRA_EXPORT_ARGS}
 
 if [[ -n "${BINDING_BENCH_REPO}" && -d "${BINDING_BENCH_REPO}/src" ]]; then
@@ -146,6 +159,7 @@ if [[ -n "${BINDING_BENCH_REPO}" && -d "${BINDING_BENCH_REPO}/src" ]]; then
         --feature_rank_path "${FEATURE_RANKS}" \
         --feature_rank_name "${FEATURE_RANK_NAME}" \
         --display_name "${DISPLAY_NAME}" \
+        "${BINDING_BENCH_FILTER_ARGS[@]}" \
         --overwrite
 else
     "${BINDING_BENCH_BIN}" discrete \
@@ -158,7 +172,8 @@ else
         --feature_rank_path "${FEATURE_RANKS}" \
         --feature_rank_name "${FEATURE_RANK_NAME}" \
         --display_name "${DISPLAY_NAME}" \
+        "${BINDING_BENCH_FILTER_ARGS[@]}" \
         --overwrite
 fi
 
-echo "Supervised Binding Bench run finished."
+echo "Promoter dense Binding Bench run finished."

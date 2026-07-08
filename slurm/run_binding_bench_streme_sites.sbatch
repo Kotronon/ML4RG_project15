@@ -1,40 +1,39 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=bb-fimo-streme
+#SBATCH --job-name=bb-streme-sites
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=02:00:00
 #SBATCH --partition=student_project
-#SBATCH --output=slurm/logs/binding-bench-%j.out
-#SBATCH --error=slurm/logs/binding-bench-%j.err
+#SBATCH --output=slurm/logs/binding-bench-streme-sites-%j.out
+#SBATCH --error=slurm/logs/binding-bench-streme-sites-%j.err
 
 set -euo pipefail
 
 PROJECT="${ML4RG_PROJECT:-/s/project/ml4rg_students/2026/project15}"
 DATASET="${DATASET:-_saccharomyces_cerevisiae_sequence_mapper}"
-SOURCE="${SOURCE:-fimo_streme}"
-RESULT_TAG="${RESULT_TAG:-}"
+RESULT_TAG="${RESULT_TAG:-nmotifs_150}"
 FILTER_LOW_COMPLEXITY="${FILTER_LOW_COMPLEXITY:-0}"
 TARGET_DATASET="${TARGET_DATASET:-DNA_rossi_chipexo}"
-DISPLAY_NAME="${DISPLAY_NAME:-STREME-FIMO S. cerevisiae}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+DISPLAY_NAME="${DISPLAY_NAME:-STREME sites S. cerevisiae}"
+PYTHON_BIN="${PYTHON_BIN:-/opt/modules/i12g/anaconda/envs/ml4rg_project15/bin/python}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "${REPO_DIR:-}" ]]; then
-    if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/fimo_to_binding_bench.py" ]]; then
+    if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/streme_sites_to_binding_bench.py" ]]; then
         REPO_DIR="${SLURM_SUBMIT_DIR}"
     else
         REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
     fi
 fi
-CONVERTER_SCRIPT="${CONVERTER_SCRIPT:-${REPO_DIR}/fimo_to_binding_bench.py}"
+CONVERTER_SCRIPT="${CONVERTER_SCRIPT:-${REPO_DIR}/streme_sites_to_binding_bench.py}"
 BINDING_BENCH_REPO="${BINDING_BENCH_REPO:-}"
 BINDING_BENCH_BIN="${BINDING_BENCH_BIN:-binding_bench}"
 
 INPUT_DIR="${PROJECT}/working/binding_bench_inputs"
-RUN_NAME="${SOURCE}_${DATASET}"
-FIMO_INPUT="${PROJECT}/working/streme_results/${SOURCE}/${DATASET}/fimo.tsv"
+RUN_NAME="streme_sites_${DATASET}"
+SITES_INPUT="${PROJECT}/working/streme_results/streme/${DATASET}/sites.tsv"
 if [[ -n "${RESULT_TAG}" ]]; then
     RUN_NAME="${RUN_NAME}_${RESULT_TAG}"
-    FIMO_INPUT="${PROJECT}/working/streme_results/${RESULT_TAG}/${SOURCE}/${DATASET}/fimo.tsv"
+    SITES_INPUT="${PROJECT}/working/streme_results/${RESULT_TAG}/streme/${DATASET}/sites.tsv"
 fi
 CONVERTER_EXTRA_ARGS=()
 case "${FILTER_LOW_COMPLEXITY}" in
@@ -56,30 +55,28 @@ mkdir -p "${INPUT_DIR}" "${RUN_DIR}" "${REPO_DIR}/slurm/logs"
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "Python executable not found: ${PYTHON_BIN}" >&2
-    echo "Set PYTHON_BIN to the full Python path from test.ipynb, e.g. sys.executable." >&2
     exit 127
 fi
-if [[ ! -s "${FIMO_INPUT}" ]]; then
-    echo "FIMO result not found or empty: ${FIMO_INPUT}" >&2
+if [[ ! -s "${SITES_INPUT}" ]]; then
+    echo "STREME sites result not found or empty: ${SITES_INPUT}" >&2
     exit 1
 fi
 
 echo "Project:          ${PROJECT}"
 echo "Repo dir:         ${REPO_DIR}"
-echo "Source:           ${SOURCE}"
 echo "Result tag:       ${RESULT_TAG:-default}"
 echo "Low complexity:   ${FILTER_LOW_COMPLEXITY}"
 echo "Dataset:          ${DATASET}"
 echo "Target dataset:   ${TARGET_DATASET}"
 echo "Python:           $(${PYTHON_BIN} -c 'import sys; print(sys.executable)')"
 echo "Converter script: ${CONVERTER_SCRIPT}"
-echo "FIMO input:       ${FIMO_INPUT}"
+echo "STREME sites:     ${SITES_INPUT}"
 
 "${PYTHON_BIN}" "${CONVERTER_SCRIPT}" \
     --project "${PROJECT}" \
-    --source "${SOURCE}" \
     --dataset "${DATASET}" \
-    --fimo "${FIMO_INPUT}" \
+    --result-tag "${RESULT_TAG}" \
+    --sites "${SITES_INPUT}" \
     "${CONVERTER_EXTRA_ARGS[@]}" \
     --predictions-out "${PREDICTIONS}" \
     --feature-ranks-out "${FEATURE_RANKS}"
@@ -115,4 +112,4 @@ else
         --overwrite
 fi
 
-echo "Binding Bench baseline finished."
+echo "Binding Bench STREME-sites run finished."
