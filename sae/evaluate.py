@@ -250,6 +250,46 @@ def _auroc_single(scores: np.ndarray, y: np.ndarray) -> float:
     return (rank_sum - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
 
 
+def _gene_held_out_scores_presplit(
+    train_acts: np.ndarray,    # [N_train, h] float16
+    train_labels: np.ndarray,  # [N_train, n_tfs]
+    test_acts: np.ndarray,     # [N_test, h] float16
+    test_labels: np.ndarray,   # [N_test, n_tfs]
+    tf_names: list[str],
+    top_n: int,
+) -> dict[str, object]:
+    """Gene-held-out scoring on pre-split activations."""
+    tr_f32 = train_acts.astype(np.float32)
+    te_f32 = test_acts.astype(np.float32)
+    results: dict[str, object] = {}
+
+    for tf_idx, tf_name in enumerate(tf_names):
+        y_train = train_labels[:, tf_idx].astype(bool)
+        y_test  = test_labels[:, tf_idx].astype(bool)
+
+        if y_train.sum() < 5 or (~y_train).sum() < 5:
+            continue
+        if y_test.sum() < 5 or (~y_test).sum() < 5:
+            continue
+
+        train_aurocs = _auroc_all_features(tr_f32, y_train)
+        best_feat    = int(np.argmax(train_aurocs))
+        train_auroc  = float(train_aurocs[best_feat])
+        test_auroc   = _auroc_single(te_f32[:, best_feat], y_test)
+
+        results[tf_name] = {
+            "best_feature": best_feat,
+            "train_auroc":  train_auroc,
+            "test_auroc":   test_auroc,
+            "n_train_pos":  int(y_train.sum()),
+            "n_test_pos":   int(y_test.sum()),
+        }
+        if (tf_idx + 1) % 10 == 0:
+            print(f"  [{tf_idx+1}/{len(tf_names)}] {tf_name}  "
+                  f"train={train_auroc:.4f}  test={test_auroc:.4f}")
+    return results
+
+
 def gene_held_out_scores(
     activations: np.ndarray,   # [N, h] float16 — ALL positions in dataset order
     labels: np.ndarray,        # [N, n_tfs]
@@ -375,27 +415,71 @@ def main() -> None:
     print("Full dataset:", dataset.summary())
 
     if args.gene_held_out:
-        # Use ALL positions (gene split happens inside gene_held_out_scores)
-        sub_idx = np.arange(len(dataset))
-        print(f"Gene-held-out mode: loading all {len(sub_idx):,} positions")
+        # Split genes first, then subsample within each split
+        all_genes = np.unique(dataset._gene_idx)
+        rng = np.random.default_rng(args.seed)
+        shuffled = rng.permutation(all_genes)
+        n_test_genes = max(1, int(len(all_genes) * args.test_fraction))
+        test_genes = set(shuffled[:n_test_genes].tolist())
+
+        test_pos_mask  = np.isin(dataset._gene_idx, list(test_genes))
+        train_pos_mask = ~test_pos_mask
+        train_flat = np.where(train_pos_mask)[0]
+        test_flat  = np.where(test_pos_mask)[0]
+
+        # Subsample within each split (keep all positives + random negatives)
+        labels_all = dataset.get_labels_array()
+        def _subsample_split(flat_idx, max_n, seed):
+            is_pos = labels_all[flat_idx].any(axis=1)
+            pos = flat_idx[is_pos]
+            neg = flat_idx[~is_pos]
+            n_neg = max(0, max_n - len(pos))
+            rng2 = np.random.default_rng(seed)
+            if len(neg) > n_neg:
+                neg = rng2.choice(neg, n_neg, replace=False)
+            out = np.concatenate([pos, neg])
+            rng2.shuffle(out)
+            return out
+
+        max_train = int(args.max_eval_positions * (1 - args.test_fraction))
+        max_test  = int(args.max_eval_positions * args.test_fraction)
+        train_idx = _subsample_split(train_flat, max_train, args.seed)
+        test_idx  = _subsample_split(test_flat,  max_test,  args.seed + 1)
+
+        print(f"Gene split: {len(all_genes)-n_test_genes} train genes / {n_test_genes} test genes")
+        print(f"Positions sampled: {len(train_idx):,} train / {len(test_idx):,} test")
+
+        # Collect activations for each split separately
+        def _make_loader(idx):
+            return DataLoader(
+                Subset(dataset, idx.tolist()),
+                batch_size=args.batch_size, shuffle=False,
+                num_workers=args.num_workers, pin_memory=device.type == "cuda",
+            )
+
+        print("Collecting train activations...")
+        train_acts, train_labels = collect_activations(model, _make_loader(train_idx), device)
+        print("Collecting test activations...")
+        test_acts, test_labels   = collect_activations(model, _make_loader(test_idx),  device)
+        sub_idx = np.concatenate([train_idx, test_idx])
     else:
         sub_idx = subsample_indices(dataset, args.max_eval_positions, args.seed)
+        subset  = Subset(dataset, sub_idx.tolist())
+        loader  = DataLoader(
+            subset, batch_size=args.batch_size, shuffle=False,
+            num_workers=args.num_workers, pin_memory=device.type == "cuda",
+        )
+        print("Collecting SAE activations (float16)...")
+        activations, labels = collect_activations(model, loader, device)
+        print(f"Activations: {activations.shape} {activations.dtype}  ~{activations.nbytes/1e9:.1f} GB")
 
-    subset = Subset(dataset, sub_idx.tolist())
-    loader = DataLoader(
-        subset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-    )
-
-    print("Collecting SAE activations (float16)...")
-    activations, labels = collect_activations(model, loader, device)
-    print(f"Activations: {activations.shape} {activations.dtype}  ~{activations.nbytes/1e9:.1f} GB")
-
-    mean_l0  = float((activations > 0).sum(axis=1).mean())
-    dead_frac = float((activations.max(axis=0) == 0).mean())
+    if args.gene_held_out:
+        _all_acts = np.concatenate([train_acts, test_acts], axis=0)
+        mean_l0   = float((_all_acts > 0).sum(axis=1).mean())
+        dead_frac = float((_all_acts.max(axis=0) == 0).mean())
+    else:
+        mean_l0   = float((activations > 0).sum(axis=1).mean())
+        dead_frac = float((activations.max(axis=0) == 0).mean())
     print(f"Mean L0: {mean_l0:.1f}/{model.cfg.hidden_dim}  Dead features: {dead_frac*100:.1f}%")
 
     assignments: dict[str, int] | None = None
@@ -427,13 +511,10 @@ def main() -> None:
 
     held_out_results: dict[str, object] | None = None
     if args.gene_held_out:
-        print(f"\nGene-held-out evaluation (test_fraction={args.test_fraction})...")
-        gene_idx_arr = dataset._gene_idx[sub_idx]
-        held_out_results = gene_held_out_scores(
-            activations, labels, gene_idx_arr,
+        print(f"\nGene-held-out scoring ({len(train_idx):,} train / {len(test_idx):,} test positions)...")
+        held_out_results = _gene_held_out_scores_presplit(
+            train_acts, train_labels, test_acts, test_labels,
             dataset.tf_names, args.top_n_features,
-            test_fraction=args.test_fraction,
-            seed=args.seed,
         )
         print(f"\n{'TF':<30}  {'feat':>6}  {'train':>6}  {'test':>6}  {'n_test_pos':>10}")
         print("-" * 65)
