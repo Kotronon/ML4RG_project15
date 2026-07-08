@@ -44,13 +44,97 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from supervised_baseline.export_binding_bench_predictions import (  # noqa: E402
-    TopKBuffer,
     call_peaks_indices,
     nms_indices,
 )
 
 DEFAULT_PROJECT = Path("/s/project/ml4rg_students/2026/project15")
 DEFAULT_INPUT_DIR = DEFAULT_PROJECT / "working/binding_bench_inputs"
+
+
+class SparseTopKBuffer:
+    """Genome-wide top-k accumulator optimized for sparse SAE activations."""
+
+    def __init__(self, n_features: int, k: int) -> None:
+        self.k = k
+        self.scores = np.full((k, n_features), -np.inf, dtype=np.float32)
+        self.chrom_codes = np.full((k, n_features), -1, dtype=np.int32)
+        self.region_codes = np.full((k, n_features), -1, dtype=np.int32)
+        self.starts = np.zeros((k, n_features), dtype=np.int64)
+
+    def update_feature_column(
+        self,
+        feature_idx: int,
+        scores: np.ndarray,
+        chrom_codes: np.ndarray,
+        region_codes: np.ndarray,
+        starts: np.ndarray,
+    ) -> None:
+        if scores.shape[0] == 0:
+            return
+
+        local_k = min(self.k, scores.shape[0])
+        if scores.shape[0] > local_k:
+            keep = np.argpartition(scores, -local_k)[-local_k:]
+            scores = scores[keep]
+            chrom_codes = chrom_codes[keep]
+            region_codes = region_codes[keep]
+            starts = starts[keep]
+
+        combined_scores = np.concatenate([self.scores[:, feature_idx], scores])
+        combined_chrom_codes = np.concatenate([self.chrom_codes[:, feature_idx], chrom_codes])
+        combined_region_codes = np.concatenate([self.region_codes[:, feature_idx], region_codes])
+        combined_starts = np.concatenate([self.starts[:, feature_idx], starts])
+
+        keep_k = min(self.k, combined_scores.shape[0])
+        if combined_scores.shape[0] > keep_k:
+            keep = np.argpartition(combined_scores, -keep_k)[-keep_k:]
+        else:
+            keep = np.arange(combined_scores.shape[0], dtype=np.int64)
+
+        self.scores[:, feature_idx] = -np.inf
+        self.chrom_codes[:, feature_idx] = -1
+        self.region_codes[:, feature_idx] = -1
+        self.starts[:, feature_idx] = 0
+        self.scores[:keep_k, feature_idx] = combined_scores[keep]
+        self.chrom_codes[:keep_k, feature_idx] = combined_chrom_codes[keep]
+        self.region_codes[:keep_k, feature_idx] = combined_region_codes[keep]
+        self.starts[:keep_k, feature_idx] = combined_starts[keep]
+
+    def update_sparse(
+        self,
+        row_indices: np.ndarray,
+        feature_indices: np.ndarray,
+        scores: np.ndarray,
+        batch_chrom_codes: np.ndarray,
+        batch_region_codes: np.ndarray,
+        batch_starts: np.ndarray,
+    ) -> None:
+        if scores.shape[0] == 0:
+            return
+
+        chrom_codes = batch_chrom_codes[row_indices]
+        region_codes = batch_region_codes[row_indices]
+        starts = batch_starts[row_indices]
+
+        order = np.argsort(feature_indices, kind="stable")
+        sorted_features = feature_indices[order]
+        split_points = np.concatenate(
+            [
+                [0],
+                np.flatnonzero(np.diff(sorted_features)) + 1,
+                [sorted_features.shape[0]],
+            ]
+        )
+        for start, end in zip(split_points[:-1], split_points[1:]):
+            group = order[start:end]
+            self.update_feature_column(
+                int(sorted_features[start]),
+                scores[group],
+                chrom_codes[group],
+                region_codes[group],
+                starts[group],
+            )
 
 
 def parse_args() -> argparse.Namespace:
@@ -117,7 +201,7 @@ def load_embeddings(
 
 def write_outputs(
     *,
-    topk: TopKBuffer,
+    topk: SparseTopKBuffer,
     chrom_names: list[str],
     regions: list[dict[str, object]],
     predictions_out: Path,
@@ -293,9 +377,10 @@ def main() -> None:
         if args.nms_radius_bp == 0
         else args.top_k_per_feature * args.pre_nms_factor
     )
-    topk = TopKBuffer(n_features=hidden_dim, k=candidate_k)
+    topk = SparseTopKBuffer(n_features=hidden_dim, k=candidate_k)
     chrom_to_code: dict[str, int] = {}
     chrom_names: list[str] = []
+    print(f"Pre-NMS candidates per feature: {candidate_k}")
 
     for gene_idx, region in enumerate(tqdm(regions, desc="Scanning promoters")):
         chrom = str(region["chrom"])
@@ -309,21 +394,31 @@ def main() -> None:
         else:
             gene_embs = np.array(gene_embs, dtype=np.float32)
 
+        genomic_starts = np.array(
+            [genomic_pos_for_offset(region, pos) for pos in range(args.seq_len)],
+            dtype=np.int64,
+        )
+        batch_chrom_codes = np.full(args.seq_len, chrom_code, dtype=np.int32)
+        batch_region_codes = np.full(args.seq_len, gene_idx, dtype=np.int32)
+
         for start in range(0, args.seq_len, args.batch_size):
             end = min(start + args.batch_size, args.seq_len)
             batch = torch.tensor(gene_embs[start:end], dtype=torch.float32, device=device)
-            acts = model(batch)["activations"].detach().cpu().numpy().astype(np.float32)
+            acts = model(batch)["activations"]
+            nz = acts > 0
+            if not bool(nz.any()):
+                continue
 
-            pos_offsets = np.arange(start, end, dtype=np.int64)
-            genomic_starts = np.array(
-                [genomic_pos_for_offset(region, int(pos)) for pos in pos_offsets],
-                dtype=np.int64,
-            )
+            row_indices, feature_indices = torch.nonzero(nz, as_tuple=True)
+            scores = acts[row_indices, feature_indices].detach().cpu().numpy().astype(np.float32)
+            row_indices_np = (row_indices + start).detach().cpu().numpy()
 
-            topk.update(
-                acts,
-                np.full(len(pos_offsets), chrom_code, dtype=np.int32),
-                np.full(len(pos_offsets), gene_idx, dtype=np.int32),
+            topk.update_sparse(
+                row_indices_np,
+                feature_indices.detach().cpu().numpy(),
+                scores,
+                batch_chrom_codes,
+                batch_region_codes,
                 genomic_starts,
             )
 
