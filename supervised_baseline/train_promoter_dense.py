@@ -398,6 +398,33 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--candidate-windows-path",
+        type=Path,
+        help=(
+            "Optional parquet of DNA-only candidate loci. Candidate sampling "
+            "uses these loci as binding-site-like windows for protein reranking."
+        ),
+    )
+    parser.add_argument(
+        "--sampled-window-candidate-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Fraction of sampled windows anchored on DNA-only candidate loci. "
+            "Requires --candidate-windows-path."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-tf-positive-fraction",
+        type=float,
+        default=0.5,
+        help=(
+            "Within candidate-anchored samples that overlap known train-TF "
+            "sites, probability of pairing the candidate with an overlapping "
+            "true TF instead of a wrong/non-overlapping TF."
+        ),
+    )
+    parser.add_argument(
         "--sampled-window-margin-bp",
         type=int,
         default=30,
@@ -681,12 +708,24 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--sampled-window-positive-fraction must be in [0, 1]")
     if not 0.0 <= args.sampled_window_hard_negative_fraction <= 1.0:
         raise ValueError("--sampled-window-hard-negative-fraction must be in [0, 1]")
+    if not 0.0 <= args.sampled_window_candidate_fraction <= 1.0:
+        raise ValueError("--sampled-window-candidate-fraction must be in [0, 1]")
+    if not 0.0 <= args.candidate_tf_positive_fraction <= 1.0:
+        raise ValueError("--candidate-tf-positive-fraction must be in [0, 1]")
     if (
         args.sampled_window_positive_fraction
         + args.sampled_window_hard_negative_fraction
+        + args.sampled_window_candidate_fraction
         > 1.0
     ):
-        raise ValueError("sampled positive and hard-negative fractions must sum to <= 1")
+        raise ValueError(
+            "sampled positive, hard-negative, and candidate fractions must sum to <= 1"
+        )
+    if args.sampled_window_candidate_fraction > 0 and args.candidate_windows_path is None:
+        raise ValueError(
+            "--candidate-windows-path is required when "
+            "--sampled-window-candidate-fraction > 0"
+        )
     if args.sampled_window_margin_bp < 0:
         raise ValueError("--sampled-window-margin-bp must be non-negative")
     if args.sampled_window_margin_bp * 2 >= args.sampled_window_size:
@@ -1332,6 +1371,13 @@ def model_config_from_args(
         "sampled_window_hard_negative_fraction": (
             args.sampled_window_hard_negative_fraction
         ),
+        "candidate_windows_path": (
+            str(args.candidate_windows_path)
+            if args.candidate_windows_path is not None
+            else None
+        ),
+        "sampled_window_candidate_fraction": args.sampled_window_candidate_fraction,
+        "candidate_tf_positive_fraction": args.candidate_tf_positive_fraction,
         "sampled_window_margin_bp": args.sampled_window_margin_bp,
         "sampled_window_negative_exclusion_bp": (
             args.sampled_window_negative_exclusion_bp
@@ -2124,6 +2170,9 @@ def main() -> None:
             samples_per_epoch=args.sampled_window_samples_per_epoch,
             positive_fraction=args.sampled_window_positive_fraction,
             hard_negative_fraction=args.sampled_window_hard_negative_fraction,
+            candidate_fraction=args.sampled_window_candidate_fraction,
+            candidate_windows_path=args.candidate_windows_path,
+            candidate_tf_positive_fraction=args.candidate_tf_positive_fraction,
             margin_bp=args.sampled_window_margin_bp,
             negative_exclusion_bp=args.sampled_window_negative_exclusion_bp,
             seed=args.seed,

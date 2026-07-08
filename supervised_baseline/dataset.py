@@ -379,6 +379,13 @@ class PromoterRecord:
     label_intervals: tuple[tuple[int, int, int], ...]
 
 
+@dataclass(frozen=True)
+class CandidateAnchor:
+    promoter_idx: int
+    offset: int
+    score: float
+
+
 class BindingBenchPromoterBaseDataset(Dataset):
     """Whole-promoter records with dense TF-by-position Binding Bench labels.
 
@@ -901,6 +908,9 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
         samples_per_epoch: int = 50_000,
         positive_fraction: float = 0.5,
         hard_negative_fraction: float = 0.25,
+        candidate_fraction: float = 0.0,
+        candidate_windows_path: str | Path | None = None,
+        candidate_tf_positive_fraction: float = 0.5,
         margin_bp: int = 30,
         negative_exclusion_bp: int = 10,
         seed: int = 42,
@@ -914,8 +924,18 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
             raise ValueError("positive_fraction must be in [0, 1]")
         if not 0.0 <= hard_negative_fraction <= 1.0:
             raise ValueError("hard_negative_fraction must be in [0, 1]")
-        if positive_fraction + hard_negative_fraction > 1.0:
-            raise ValueError("positive and hard-negative fractions must sum to <= 1")
+        if not 0.0 <= candidate_fraction <= 1.0:
+            raise ValueError("candidate_fraction must be in [0, 1]")
+        if not 0.0 <= candidate_tf_positive_fraction <= 1.0:
+            raise ValueError("candidate_tf_positive_fraction must be in [0, 1]")
+        if positive_fraction + hard_negative_fraction + candidate_fraction > 1.0:
+            raise ValueError(
+                "positive, hard-negative, and candidate fractions must sum to <= 1"
+            )
+        if candidate_fraction > 0 and candidate_windows_path is None:
+            raise ValueError(
+                "candidate_windows_path is required when candidate_fraction > 0"
+            )
         if margin_bp < 0:
             raise ValueError("margin_bp must be non-negative")
         if margin_bp * 2 >= window_size:
@@ -939,6 +959,11 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
         self.samples_per_epoch = int(samples_per_epoch)
         self.positive_fraction = float(positive_fraction)
         self.hard_negative_fraction = float(hard_negative_fraction)
+        self.candidate_fraction = float(candidate_fraction)
+        self.candidate_windows_path = (
+            Path(candidate_windows_path) if candidate_windows_path is not None else None
+        )
+        self.candidate_tf_positive_fraction = float(candidate_tf_positive_fraction)
         self.margin_bp = int(margin_bp)
         self.negative_exclusion_bp = int(negative_exclusion_bp)
         self.seed = int(seed)
@@ -961,6 +986,9 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
             raise ValueError("Positive sampling requested but no positive anchors exist")
         if self.hard_negative_fraction > 0 and len(self.flat_positive_anchors) == 0:
             raise ValueError("Hard-negative sampling requested but no anchors exist")
+        self.candidate_anchors = self._load_candidate_anchors()
+        if self.candidate_fraction > 0 and not self.candidate_anchors:
+            raise ValueError("Candidate sampling requested but no candidate anchors exist")
 
     def __len__(self) -> int:
         return self.samples_per_epoch
@@ -973,6 +1001,13 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
             return self._sample_positive(rng)
         if kind_value < self.positive_fraction + self.hard_negative_fraction:
             return self._sample_hard_negative(rng)
+        if (
+            kind_value
+            < self.positive_fraction
+            + self.hard_negative_fraction
+            + self.candidate_fraction
+        ):
+            return self._sample_candidate(rng)
         return self._sample_easy_negative(rng)
 
     def summary(self) -> dict[str, object]:
@@ -986,9 +1021,20 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
             "samples_per_epoch": self.samples_per_epoch,
             "positive_fraction": self.positive_fraction,
             "hard_negative_fraction": self.hard_negative_fraction,
+            "candidate_fraction": self.candidate_fraction,
             "easy_negative_fraction": (
-                1.0 - self.positive_fraction - self.hard_negative_fraction
+                1.0
+                - self.positive_fraction
+                - self.hard_negative_fraction
+                - self.candidate_fraction
             ),
+            "candidate_windows_path": (
+                str(self.candidate_windows_path)
+                if self.candidate_windows_path is not None
+                else None
+            ),
+            "candidate_tf_positive_fraction": self.candidate_tf_positive_fraction,
+            "n_candidate_anchors": len(self.candidate_anchors),
             "margin_bp": self.margin_bp,
             "negative_exclusion_bp": self.negative_exclusion_bp,
         }
@@ -1018,6 +1064,66 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
 
         # Avoid holding stale indices if the input iterable had duplicates.
         self.promoter_indices = sorted(promoter_set)
+
+    def _load_candidate_anchors(self) -> list[CandidateAnchor]:
+        if self.candidate_windows_path is None:
+            return []
+        table = pl.read_parquet(self.candidate_windows_path)
+        if table.is_empty():
+            return []
+
+        promoter_set = set(self.promoter_indices)
+        gene_to_promoter_idx = {
+            self.base_dataset.records[idx].gene_id: idx
+            for idx in self.promoter_indices
+        }
+        candidates: list[CandidateAnchor] = []
+        for row in table.iter_rows(named=True):
+            promoter_idx: int | None = None
+            if "record_idx" in row and row["record_idx"] is not None:
+                promoter_idx = int(row["record_idx"])
+            elif "gene_id" in row and row["gene_id"] is not None:
+                promoter_idx = gene_to_promoter_idx.get(str(row["gene_id"]))
+            if promoter_idx is None or promoter_idx not in promoter_set:
+                continue
+
+            record = self.base_dataset.records[promoter_idx]
+            offset: int | None = None
+            for offset_column in ("offset", "center_offset", "position_offset"):
+                if offset_column in row and row[offset_column] is not None:
+                    offset = int(row[offset_column])
+                    break
+            if offset is None:
+                genomic_value = None
+                for genomic_column in ("genomic_pos", "center", "start"):
+                    if genomic_column in row and row[genomic_column] is not None:
+                        genomic_value = int(row[genomic_column])
+                        break
+                if genomic_value is None:
+                    raise ValueError(
+                        "Candidate table must contain record_idx/offset or "
+                        "gene_id plus one of genomic_pos, center, start."
+                    )
+                offset = self._record_genomic_to_offset(record, genomic_value)
+
+            if offset is None or not 0 <= offset < len(record.sequence):
+                continue
+            score = float(row["score"]) if "score" in row and row["score"] is not None else 0.0
+            candidates.append(
+                CandidateAnchor(
+                    promoter_idx=promoter_idx,
+                    offset=int(offset),
+                    score=score,
+                )
+            )
+        return candidates
+
+    def _record_genomic_to_offset(self, record: PromoterRecord, genomic_pos: int) -> int | None:
+        if not (record.model_start <= genomic_pos < record.model_end):
+            return None
+        if self.base_dataset.sequence_orientation == "strand-aware" and record.strand == "-":
+            return record.model_end - genomic_pos - 1
+        return genomic_pos - record.model_start
 
     def _sample_positive(self, rng: np.random.Generator) -> dict[str, object]:
         for _ in range(self.max_sampling_attempts):
@@ -1053,6 +1159,59 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
             ):
                 continue
             return self._make_item(promoter_idx, target_tf, start, "hard_negative")
+
+        return self._sample_easy_negative(rng)
+
+    def _sample_candidate(self, rng: np.random.Generator) -> dict[str, object]:
+        for _ in range(self.max_sampling_attempts):
+            anchor = self.candidate_anchors[
+                int(rng.integers(len(self.candidate_anchors)))
+            ]
+            start = self._window_start_around_point(
+                rng,
+                anchor.promoter_idx,
+                anchor.offset,
+            )
+            if start is None:
+                continue
+            end = start + self.window_size
+            record = self.base_dataset.records[anchor.promoter_idx]
+            overlapping_tfs = self._overlapping_tfs(record, start, end, buffer_bp=0)
+            if (
+                overlapping_tfs
+                and rng.random() < self.candidate_tf_positive_fraction
+            ):
+                tf_idx = int(rng.choice(overlapping_tfs))
+                return self._make_item(
+                    anchor.promoter_idx,
+                    tf_idx,
+                    start,
+                    "candidate_positive",
+                )
+
+            non_overlapping_tfs = [
+                tf_idx for tf_idx in self.tf_indices if tf_idx not in set(overlapping_tfs)
+            ]
+            if non_overlapping_tfs:
+                tf_idx = int(rng.choice(non_overlapping_tfs))
+                sampling_kind = (
+                    "candidate_wrong_tf" if overlapping_tfs else "candidate_negative"
+                )
+                return self._make_item(
+                    anchor.promoter_idx,
+                    tf_idx,
+                    start,
+                    sampling_kind,
+                )
+
+            if overlapping_tfs:
+                tf_idx = int(rng.choice(overlapping_tfs))
+                return self._make_item(
+                    anchor.promoter_idx,
+                    tf_idx,
+                    start,
+                    "candidate_positive_fallback",
+                )
 
         return self._sample_easy_negative(rng)
 
@@ -1131,6 +1290,29 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
 
         valid_lo = max(0, base - (self.window_size - self.margin_bp - 1))
         valid_hi = min(base - self.margin_bp, len(record.sequence) - self.window_size)
+        if valid_hi >= valid_lo:
+            return int(rng.integers(valid_lo, valid_hi + 1))
+        return None
+
+    def _window_start_around_point(
+        self,
+        rng: np.random.Generator,
+        promoter_idx: int,
+        offset: int,
+    ) -> int | None:
+        record = self.base_dataset.records[promoter_idx]
+        if len(record.sequence) < self.window_size:
+            return None
+
+        relative_offset = int(
+            rng.integers(self.margin_bp, self.window_size - self.margin_bp)
+        )
+        start = offset - relative_offset
+        if 0 <= start <= len(record.sequence) - self.window_size:
+            return start
+
+        valid_lo = max(0, offset - (self.window_size - self.margin_bp - 1))
+        valid_hi = min(offset - self.margin_bp, len(record.sequence) - self.window_size)
         if valid_hi >= valid_lo:
             return int(rng.integers(valid_lo, valid_hi + 1))
         return None
@@ -1270,3 +1452,22 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
             if int(hi) > query_start and int(lo) < query_end:
                 return True
         return False
+
+    def _overlapping_tfs(
+        self,
+        record: PromoterRecord,
+        window_start: int,
+        window_end: int,
+        *,
+        buffer_bp: int,
+    ) -> list[int]:
+        query_start = window_start - buffer_bp
+        query_end = window_end + buffer_bp
+        overlapping = set()
+        for interval_tf, lo, hi in record.label_intervals:
+            tf_idx = int(interval_tf)
+            if tf_idx not in self.tf_set:
+                continue
+            if int(hi) > query_start and int(lo) < query_end:
+                overlapping.add(tf_idx)
+        return sorted(overlapping)

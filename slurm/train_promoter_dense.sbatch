@@ -67,6 +67,9 @@ SAMPLED_WINDOW_SIZE="${SAMPLED_WINDOW_SIZE:-200}"
 SAMPLED_WINDOW_SAMPLES_PER_EPOCH="${SAMPLED_WINDOW_SAMPLES_PER_EPOCH:-50000}"
 SAMPLED_WINDOW_POSITIVE_FRACTION="${SAMPLED_WINDOW_POSITIVE_FRACTION:-0.5}"
 SAMPLED_WINDOW_HARD_NEGATIVE_FRACTION="${SAMPLED_WINDOW_HARD_NEGATIVE_FRACTION:-0.25}"
+CANDIDATE_WINDOWS_PATH="${CANDIDATE_WINDOWS_PATH:-}"
+SAMPLED_WINDOW_CANDIDATE_FRACTION="${SAMPLED_WINDOW_CANDIDATE_FRACTION:-0.0}"
+CANDIDATE_TF_POSITIVE_FRACTION="${CANDIDATE_TF_POSITIVE_FRACTION:-0.5}"
 SAMPLED_WINDOW_MARGIN_BP="${SAMPLED_WINDOW_MARGIN_BP:-30}"
 SAMPLED_WINDOW_NEGATIVE_EXCLUSION_BP="${SAMPLED_WINDOW_NEGATIVE_EXCLUSION_BP:-10}"
 SAMPLED_WINDOW_MAX_ATTEMPTS="${SAMPLED_WINDOW_MAX_ATTEMPTS:-100}"
@@ -179,6 +182,9 @@ echo "Sampled window size:  ${SAMPLED_WINDOW_SIZE}"
 echo "Samples per epoch:    ${SAMPLED_WINDOW_SAMPLES_PER_EPOCH}"
 echo "Positive fraction:    ${SAMPLED_WINDOW_POSITIVE_FRACTION}"
 echo "Hard neg fraction:    ${SAMPLED_WINDOW_HARD_NEGATIVE_FRACTION}"
+echo "Candidate windows:    ${CANDIDATE_WINDOWS_PATH:-<none>}"
+echo "Candidate fraction:   ${SAMPLED_WINDOW_CANDIDATE_FRACTION}"
+echo "Candidate pos frac:   ${CANDIDATE_TF_POSITIVE_FRACTION}"
 echo "Sample margin bp:     ${SAMPLED_WINDOW_MARGIN_BP}"
 echo "Neg exclusion bp:     ${SAMPLED_WINDOW_NEGATIVE_EXCLUSION_BP}"
 echo "Sample max attempts:  ${SAMPLED_WINDOW_MAX_ATTEMPTS}"
@@ -285,6 +291,9 @@ fi
 if [[ -n "${FOCAL_ALPHA}" ]]; then
     OPTIONAL_ARGS+=(--focal-alpha "${FOCAL_ALPHA}")
 fi
+if [[ -n "${CANDIDATE_WINDOWS_PATH}" ]]; then
+    OPTIONAL_ARGS+=(--candidate-windows-path "${CANDIDATE_WINDOWS_PATH}")
+fi
 if [[ "${PROTEIN_L2_NORMALIZE}" == "true" ]]; then
     OPTIONAL_ARGS+=(--protein-l2-normalize)
 fi
@@ -329,6 +338,8 @@ fi
     --sampled-window-samples-per-epoch "${SAMPLED_WINDOW_SAMPLES_PER_EPOCH}" \
     --sampled-window-positive-fraction "${SAMPLED_WINDOW_POSITIVE_FRACTION}" \
     --sampled-window-hard-negative-fraction "${SAMPLED_WINDOW_HARD_NEGATIVE_FRACTION}" \
+    --sampled-window-candidate-fraction "${SAMPLED_WINDOW_CANDIDATE_FRACTION}" \
+    --candidate-tf-positive-fraction "${CANDIDATE_TF_POSITIVE_FRACTION}" \
     --sampled-window-margin-bp "${SAMPLED_WINDOW_MARGIN_BP}" \
     --sampled-window-negative-exclusion-bp "${SAMPLED_WINDOW_NEGATIVE_EXCLUSION_BP}" \
     --sampled-window-max-attempts "${SAMPLED_WINDOW_MAX_ATTEMPTS}" \
