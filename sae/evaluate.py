@@ -5,12 +5,21 @@ Memory-efficient design:
   (--max-eval-positions, default 500k) keeping ALL positive positions + random negatives.
 - Dataset stores only metadata + labels per record; embeddings loaded on demand.
 
+By default, scores every SAE feature against every TF. When
+``--best-assignment-path`` is provided (from a prior Binding Bench run),
+only the assigned TF→feature pairs are scored — the recommended workflow
+after exporting SAE peaks with ``sae.export_binding_bench_predictions``.
+
 Example:
     python -m sae.evaluate \
         --checkpoint /path/to/sae/models/topk_ef8_k32/best.pt \
         --npy-path /path/to/embs_ds_fungi_upstream_ATG_1000_l10.npy \
         --sites-path /path/to/DNA_rossi_chipexo_sites.parquet \
         --regions-path /path/to/_saccharomyces_cerevisiae_sequence_mapper.parquet
+
+    python -m sae.evaluate \
+        --checkpoint /path/to/sae/models/topk_ef8_k32/best.pt \
+        --best-assignment-path working/binding_bench_runs/sae_topk_nms50/binding_bench/discrete/DNA_rossi_chipexo
 """
 
 from __future__ import annotations
@@ -31,9 +40,11 @@ except ModuleNotFoundError:
 from torch.utils.data import DataLoader, Subset
 
 try:
+    from .binding_bench_utils import load_tf_feature_assignments, resolve_best_assignment_path
     from .dataset import DEFAULT_NPY_PATH, DEFAULT_REGIONS_PATH, DEFAULT_SITES_PATH, NpyPositionWithLabelsDataset
     from .model import SAEConfig, SparseAutoencoder, build_sae
 except ImportError:
+    from binding_bench_utils import load_tf_feature_assignments, resolve_best_assignment_path
     from dataset import DEFAULT_NPY_PATH, DEFAULT_REGIONS_PATH, DEFAULT_SITES_PATH, NpyPositionWithLabelsDataset
     from model import SAEConfig, SparseAutoencoder, build_sae
 
@@ -58,6 +69,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top-n-features", type=int, default=10)
     p.add_argument("--max-eval-positions", type=int, default=500_000,
                    help="Subsample this many positions for AUROC (keep all positives + random negatives).")
+    p.add_argument(
+        "--best-assignment-path",
+        type=Path,
+        help=(
+            "Binding Bench discrete run dir or best_assnt_metrics parquet. "
+            "When set, AUROC is computed only for the assigned TF→feature pairs."
+        ),
+    )
+    p.add_argument(
+        "--assignment-metric",
+        default="jaccard",
+        help="Metric used to resolve best-assignment parquet from a run directory.",
+    )
+    p.add_argument(
+        "--assignment-dataset",
+        default="DNA_rossi_chipexo",
+        help="Binding Bench dataset name used to resolve best-assignment parquet.",
+    )
+    p.add_argument(
+        "--all-features",
+        action="store_true",
+        help="Also compute exhaustive per-feature AUROC when --best-assignment-path is set.",
+    )
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
@@ -156,6 +190,49 @@ def per_feature_scores(
     return results
 
 
+def matched_feature_scores(
+    activations: np.ndarray,
+    labels: np.ndarray,
+    tf_names: list[str],
+    assignments: dict[str, int],
+) -> dict[str, object]:
+    """Score only the Binding Bench-assigned SAE feature for each TF."""
+    acts_f32 = activations.astype(np.float32)
+    tf_to_idx = {name: idx for idx, name in enumerate(tf_names)}
+    results: dict[str, object] = {}
+
+    for tf_name, feat_idx in sorted(assignments.items()):
+        if tf_name not in tf_to_idx:
+            continue
+        if not (0 <= feat_idx < acts_f32.shape[1]):
+            continue
+
+        tf_idx = tf_to_idx[tf_name]
+        y = labels[:, tf_idx]
+        n_pos = int(y.sum())
+        if n_pos < 5 or (len(y) - n_pos) < 5:
+            continue
+
+        scores = acts_f32[:, feat_idx]
+        auroc = 0.5
+        ap = float(n_pos) / len(y)
+        if scores.max() > 0:
+            try:
+                auroc = float(roc_auc_score(y, scores))
+                ap = float(average_precision_score(y, scores))
+            except Exception:
+                pass
+
+        results[tf_name] = {
+            "assigned_feature": int(feat_idx),
+            "auroc": auroc,
+            "ap": ap,
+            "n_positive_positions": n_pos,
+            "prevalence": float(n_pos) / len(y),
+        }
+    return results
+
+
 def main() -> None:
     args = parse_args()
     device = get_device(args.device)
@@ -195,15 +272,50 @@ def main() -> None:
     dead_frac = float((activations.max(axis=0) == 0).mean())
     print(f"Mean L0: {mean_l0:.1f}/{model.cfg.hidden_dim}  Dead features: {dead_frac*100:.1f}%")
 
-    print(f"Computing per-feature AUROC/AP for {dataset.n_tfs} TFs...")
-    tf_results = per_feature_scores(activations, labels, dataset.tf_names, args.top_n_features)
+    assignments: dict[str, int] | None = None
+    if args.best_assignment_path is not None:
+        assignment_path = resolve_best_assignment_path(
+            args.best_assignment_path,
+            metric=args.assignment_metric,
+            dataset=args.assignment_dataset,
+        )
+        assignments = load_tf_feature_assignments(assignment_path)
+        print(f"Loaded {len(assignments)} TF→feature assignments from {assignment_path}")
 
-    print(f"\n{'TF':<30}  {'best_feat':>9}  {'AUROC':>6}  {'AP':>6}  {'n_pos':>6}")
-    print("-" * 65)
-    for tf_name, info in sorted(tf_results.items(), key=lambda kv: kv[1]["max_auroc"], reverse=True)[:25]:
-        feat, auc = info["best_features_auroc"][0]
-        _,    ap  = info["best_features_ap"][0]
-        print(f"{tf_name:<30}  {feat:>9d}  {auc:>6.4f}  {ap:>6.4f}  {info['n_positive_positions']:>6d}")
+    matched_results: dict[str, object] | None = None
+    if assignments is not None:
+        print(f"Computing matched-feature AUROC/AP for assigned pairs...")
+        matched_results = matched_feature_scores(
+            activations, labels, dataset.tf_names, assignments
+        )
+        print(f"\n{'TF':<30}  {'feature':>9}  {'AUROC':>6}  {'AP':>6}  {'n_pos':>6}")
+        print("-" * 65)
+        for tf_name, info in sorted(
+            matched_results.items(), key=lambda kv: kv[1]["auroc"], reverse=True
+        )[:25]:
+            print(
+                f"{tf_name:<30}  {info['assigned_feature']:>9d}  "
+                f"{info['auroc']:>6.4f}  {info['ap']:>6.4f}  "
+                f"{info['n_positive_positions']:>6d}"
+            )
+
+    tf_results: dict[str, object] | None = None
+    if assignments is None or args.all_features:
+        print(f"Computing per-feature AUROC/AP for {dataset.n_tfs} TFs...")
+        tf_results = per_feature_scores(
+            activations, labels, dataset.tf_names, args.top_n_features
+        )
+        print(f"\n{'TF':<30}  {'best_feat':>9}  {'AUROC':>6}  {'AP':>6}  {'n_pos':>6}")
+        print("-" * 65)
+        for tf_name, info in sorted(
+            tf_results.items(), key=lambda kv: kv[1]["max_auroc"], reverse=True
+        )[:25]:
+            feat, auc = info["best_features_auroc"][0]
+            _, ap = info["best_features_ap"][0]
+            print(
+                f"{tf_name:<30}  {feat:>9d}  {auc:>6.4f}  {ap:>6.4f}  "
+                f"{info['n_positive_positions']:>6d}"
+            )
 
     if args.output_dir is None:
         args.output_dir = args.output_root / args.checkpoint.parent.name
@@ -217,9 +329,16 @@ def main() -> None:
         "half_window": args.half_window,
         "mean_l0": mean_l0,
         "dead_fraction": dead_frac,
+        "best_assignment_path": str(args.best_assignment_path) if args.best_assignment_path else None,
+        "matched_features_only": assignments is not None and not args.all_features,
     }
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
-    (args.output_dir / "tf_feature_scores.json").write_text(json.dumps(tf_results, indent=2))
+    if matched_results is not None:
+        (args.output_dir / "matched_feature_scores.json").write_text(
+            json.dumps(matched_results, indent=2)
+        )
+    if tf_results is not None:
+        (args.output_dir / "tf_feature_scores.json").write_text(json.dumps(tf_results, indent=2))
 
     np.savez_compressed(
         args.output_dir / "activations.npz",

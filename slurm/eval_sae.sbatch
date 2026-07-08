@@ -29,7 +29,18 @@ NUM_WORKERS="${NUM_WORKERS:-0}"
 DEVICE="${DEVICE:-auto}"
 TOP_N_FEATURES="${TOP_N_FEATURES:-10}"
 MAX_EVAL_POSITIONS="${MAX_EVAL_POSITIONS:-500000}"
+BEST_ASSIGNMENT_PATH="${BEST_ASSIGNMENT_PATH:-}"
+ASSIGNMENT_METRIC="${ASSIGNMENT_METRIC:-jaccard}"
+ASSIGNMENT_DATASET="${ASSIGNMENT_DATASET:-DNA_rossi_chipexo}"
+ALL_FEATURES="${ALL_FEATURES:-false}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+
+if [[ -n "${BEST_ASSIGNMENT_PATH}" ]]; then
+    EXTRA_ARGS="${EXTRA_ARGS} --best-assignment-path ${BEST_ASSIGNMENT_PATH} --assignment-metric ${ASSIGNMENT_METRIC} --assignment-dataset ${ASSIGNMENT_DATASET}"
+    if [[ "${ALL_FEATURES}" == "true" ]]; then
+        EXTRA_ARGS="${EXTRA_ARGS} --all-features"
+    fi
+fi
 
 CONDA_PREFIX="$(${PYTHON_BIN} -c 'import sys; print(sys.prefix)')"
 export PATH="${CONDA_PREFIX}/bin:${PATH}"
@@ -41,6 +52,9 @@ mkdir -p "${REPO_DIR}/slurm/logs"
 
 echo "Checkpoint: ${CHECKPOINT}"
 echo "Embeddings: ${EMBEDDING_PATH}"
+if [[ -n "${BEST_ASSIGNMENT_PATH}" ]]; then
+    echo "Best assignment: ${BEST_ASSIGNMENT_PATH}"
+fi
 
 "${PYTHON_BIN}" -m sae.evaluate \
     --checkpoint "${CHECKPOINT}" \
