@@ -340,17 +340,13 @@ def main() -> None:
         tf_results = per_feature_scores(
             activations, labels, dataset.tf_names, args.top_n_features
         )
-        print(f"\n{'TF':<30}  {'best_feat':>9}  {'AUROC':>6}  {'AP':>6}  {'n_pos':>6}")
-        print("-" * 65)
+        print(f"\n{'TF':<30}  {'best_feat':>9}  {'AUROC':>6}  {'n_pos':>6}")
+        print("-" * 55)
         for tf_name, info in sorted(
             tf_results.items(), key=lambda kv: kv[1]["max_auroc"], reverse=True
         )[:25]:
             feat, auc = info["best_features_auroc"][0]
-            _, ap = info["best_features_ap"][0]
-            print(
-                f"{tf_name:<30}  {feat:>9d}  {auc:>6.4f}  {ap:>6.4f}  "
-                f"{info['n_positive_positions']:>6d}"
-            )
+            print(f"{tf_name:<30}  {feat:>9d}  {auc:>6.4f}  {info['n_positive_positions']:>6d}")
 
     if args.output_dir is None:
         args.output_dir = args.output_root / args.checkpoint.parent.name
