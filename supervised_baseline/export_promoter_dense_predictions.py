@@ -54,6 +54,7 @@ PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_local_attention",
     "dense_protein_motif_cnn",
     "dense_protein_residual_bilinear_cnn",
+    "dense_protein_direct_scorer_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )

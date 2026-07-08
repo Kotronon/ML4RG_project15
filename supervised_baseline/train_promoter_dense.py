@@ -83,6 +83,7 @@ PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_local_attention",
     "dense_protein_motif_cnn",
     "dense_protein_residual_bilinear_cnn",
+    "dense_protein_direct_scorer_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
 )
@@ -1239,10 +1240,11 @@ def align_dna_branch_args_from_checkpoint(
     *,
     input_channels: int,
 ) -> None:
-    if (
-        args.model != "dense_protein_residual_bilinear_cnn"
-        or args.pretrained_dna_checkpoint is None
-    ):
+    dna_branch_models = {
+        "dense_protein_residual_bilinear_cnn",
+        "dense_protein_direct_scorer_cnn",
+    }
+    if args.model not in dna_branch_models or args.pretrained_dna_checkpoint is None:
         return
 
     checkpoint = load_checkpoint_cpu(args.pretrained_dna_checkpoint)
@@ -1256,11 +1258,12 @@ def align_dna_branch_args_from_checkpoint(
     if checkpoint_model not in {
         "dense_motif_dilated_attention_cnn",
         "dense_protein_residual_bilinear_cnn",
+        "dense_protein_direct_scorer_cnn",
     }:
         raise ValueError(
-            "--pretrained-dna-checkpoint for dense_protein_residual_bilinear_cnn "
-            "must come from dense_motif_dilated_attention_cnn or another "
-            f"dense_protein_residual_bilinear_cnn checkpoint, got {checkpoint_model!r}"
+            f"--pretrained-dna-checkpoint for {args.model} must come from "
+            "dense_motif_dilated_attention_cnn or another compatible "
+            f"dna-branch protein model checkpoint, got {checkpoint_model!r}"
         )
 
     checkpoint_input_channels = config.get("input_channels", saved_args.get("input_channels"))
