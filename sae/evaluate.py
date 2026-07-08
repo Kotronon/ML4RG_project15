@@ -147,34 +147,61 @@ def collect_activations(
     return np.concatenate(all_acts, axis=0), np.concatenate(all_labels, axis=0)
 
 
+def _auroc_all_features(acts: np.ndarray, y: np.ndarray, chunk: int = 512) -> np.ndarray:
+    """Vectorised rank-based AUROC for all features at once.
+
+    Processes features in chunks of `chunk` to bound working memory to ~2 GB.
+    """
+    n, h = acts.shape
+    n_pos = int(y.sum())
+    n_neg = n - n_pos
+    aurocs = np.full(h, 0.5)
+    if n_pos == 0 or n_neg == 0:
+        return aurocs
+    denom = float(n_pos) * float(n_neg)
+    row_idx = np.arange(n)
+    for start in range(0, h, chunk):
+        end = min(start + chunk, h)
+        cs = end - start
+        blk = acts[:, start:end]                          # [N, cs]
+        order = np.argsort(blk, axis=0)                   # [N, cs]
+        inv = np.empty_like(order)
+        inv[order, np.arange(cs)[None, :]] = row_idx[:, None]
+        rank_sum = (inv[y.astype(bool)] + 1).sum(axis=0)  # [cs]
+        aurocs[start:end] = (rank_sum - n_pos * (n_pos + 1) / 2) / denom
+    return aurocs
+
+
+def _ap_all_features(acts: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Average precision per feature (sklearn, only for active features)."""
+    n_pos = int(y.sum())
+    baseline = float(n_pos) / len(y)
+    aps = np.full(acts.shape[1], baseline)
+    for j in np.where(acts.max(axis=0) > 0)[0]:
+        try:
+            aps[j] = average_precision_score(y, acts[:, j])
+        except Exception:
+            pass
+    return aps
+
+
 def per_feature_scores(
     activations: np.ndarray,   # [N, h] float16
     labels: np.ndarray,        # [N, n_tfs]
     tf_names: list[str],
     top_n: int,
 ) -> dict[str, object]:
-    acts_f32 = activations.astype(np.float32)  # cast once for sklearn
-    n_features = acts_f32.shape[1]
+    acts_f32 = activations.astype(np.float32)
     results: dict[str, object] = {}
 
     for tf_idx, tf_name in enumerate(tf_names):
-        y = labels[:, tf_idx]
+        y = labels[:, tf_idx].astype(bool)
         n_pos = int(y.sum())
         if n_pos < 5 or (len(y) - n_pos) < 5:
             continue
 
-        aurocs = np.full(n_features, 0.5)
-        aps    = np.full(n_features, float(n_pos) / len(y))
-
-        for feat_idx in range(n_features):
-            scores = acts_f32[:, feat_idx]
-            if scores.max() == 0:
-                continue
-            try:
-                aurocs[feat_idx] = roc_auc_score(y, scores)
-                aps[feat_idx]    = average_precision_score(y, scores)
-            except Exception:
-                pass
+        aurocs = _auroc_all_features(acts_f32, y)
+        aps    = _ap_all_features(acts_f32, y)
 
         top_auroc = np.argsort(aurocs)[::-1][:top_n]
         top_ap    = np.argsort(aps)[::-1][:top_n]
@@ -187,6 +214,8 @@ def per_feature_scores(
             "n_positive_positions": n_pos,
             "prevalence": float(n_pos) / len(y),
         }
+        if (tf_idx + 1) % 10 == 0:
+            print(f"  [{tf_idx+1}/{len(tf_names)}] {tf_name}  best_auroc={aurocs.max():.4f}")
     return results
 
 
