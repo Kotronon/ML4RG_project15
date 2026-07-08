@@ -1,0 +1,21 @@
+{
+  "checkpoint": "/s/project/ml4rg_students/2026/project15/working/sae/models/topk_ef8_k32/best.pt",
+  "sae_config": {
+    "input_dim": 768,
+    "expansion_factor": 8,
+    "variant": "topk",
+    "k": 32,
+    "k_fraction": null,
+    "l1_coeff": 0.001,
+    "normalize_decoder": true,
+    "tied_weights": false,
+    "init_scale": 0.02
+  },
+  "n_positions_evaluated": 596883,
+  "n_tfs": 167,
+  "half_window": 5,
+  "mean_l0": 32.0,
+  "dead_fraction": 0.027669270833333332,
+  "best_assignment_path": null,
+  "matched_features_only": false
+}
