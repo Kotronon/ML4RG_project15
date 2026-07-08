@@ -93,6 +93,16 @@ def parse_args() -> argparse.Namespace:
         help="Also compute exhaustive per-feature AUROC when --best-assignment-path is set.",
     )
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--gene-held-out",
+        action="store_true",
+        help=(
+            "Proper train/test evaluation: split genes into 80%% train / 20%% test. "
+            "Best feature per TF is chosen on train genes; AUROC is reported on test genes only."
+        ),
+    )
+    p.add_argument("--test-fraction", type=float, default=0.2,
+                   help="Fraction of genes held out for testing (default 0.2).")
     return p.parse_args()
 
 
@@ -225,6 +235,83 @@ def per_feature_scores(
     return results
 
 
+def _auroc_single(scores: np.ndarray, y: np.ndarray) -> float:
+    """AUROC for one feature vector (rank-sum formula, no sklearn)."""
+    pos = scores[y]
+    neg = scores[~y]
+    if len(pos) == 0 or len(neg) == 0:
+        return 0.5
+    # Mann-Whitney U
+    all_scores = np.concatenate([pos, neg])
+    order = np.argsort(all_scores)
+    ranks = np.empty_like(order, dtype=np.float64)
+    ranks[order] = np.arange(1, len(all_scores) + 1)
+    rank_sum = ranks[:len(pos)].sum()
+    return (rank_sum - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
+
+
+def gene_held_out_scores(
+    activations: np.ndarray,   # [N, h] float16 — ALL positions in dataset order
+    labels: np.ndarray,        # [N, n_tfs]
+    gene_idx: np.ndarray,      # [N] int32 — gene index for each position
+    tf_names: list[str],
+    top_n: int,
+    test_fraction: float = 0.2,
+    seed: int = 42,
+) -> dict[str, object]:
+    """Gene-held-out evaluation: select best feature on train genes, report AUROC on test genes.
+
+    This avoids the data leakage of evaluating on the same genes used for SAE training.
+    """
+    all_genes = np.unique(gene_idx)
+    rng = np.random.default_rng(seed)
+    shuffled = rng.permutation(all_genes)
+    n_test = max(1, int(len(all_genes) * test_fraction))
+    test_gene_set = set(shuffled[:n_test].tolist())
+
+    test_mask  = np.isin(gene_idx, list(test_gene_set))
+    train_mask = ~test_mask
+
+    print(f"Gene split: {train_mask.sum():,} train positions ({len(all_genes)-n_test} genes) "
+          f"/ {test_mask.sum():,} test positions ({n_test} genes)")
+
+    acts_f32     = activations.astype(np.float32)
+    train_acts   = acts_f32[train_mask]
+    test_acts    = acts_f32[test_mask]
+    train_labels = labels[train_mask]
+    test_labels  = labels[test_mask]
+
+    results: dict[str, object] = {}
+    for tf_idx, tf_name in enumerate(tf_names):
+        y_train = train_labels[:, tf_idx].astype(bool)
+        y_test  = test_labels[:, tf_idx].astype(bool)
+
+        if y_train.sum() < 5 or (~y_train).sum() < 5:
+            continue
+        if y_test.sum() < 5 or (~y_test).sum() < 5:
+            continue
+
+        # Step 1: find best feature using train genes only
+        train_aurocs = _auroc_all_features(train_acts, y_train)
+        best_feat    = int(np.argmax(train_aurocs))
+        train_auroc  = float(train_aurocs[best_feat])
+
+        # Step 2: evaluate that feature on held-out test genes
+        test_auroc = _auroc_single(test_acts[:, best_feat], y_test)
+
+        results[tf_name] = {
+            "best_feature":    best_feat,
+            "train_auroc":     train_auroc,
+            "test_auroc":      test_auroc,
+            "n_train_pos":     int(y_train.sum()),
+            "n_test_pos":      int(y_test.sum()),
+        }
+        if (tf_idx + 1) % 10 == 0:
+            print(f"  [{tf_idx+1}/{len(tf_names)}] {tf_name}  "
+                  f"train={train_auroc:.4f}  test={test_auroc:.4f}")
+    return results
+
+
 def matched_feature_scores(
     activations: np.ndarray,
     labels: np.ndarray,
@@ -287,10 +374,14 @@ def main() -> None:
     )
     print("Full dataset:", dataset.summary())
 
-    # Subsample to keep memory feasible
-    sub_idx = subsample_indices(dataset, args.max_eval_positions, args.seed)
-    subset  = Subset(dataset, sub_idx.tolist())
+    if args.gene_held_out:
+        # Use ALL positions (gene split happens inside gene_held_out_scores)
+        sub_idx = np.arange(len(dataset))
+        print(f"Gene-held-out mode: loading all {len(sub_idx):,} positions")
+    else:
+        sub_idx = subsample_indices(dataset, args.max_eval_positions, args.seed)
 
+    subset = Subset(dataset, sub_idx.tolist())
     loader = DataLoader(
         subset,
         batch_size=args.batch_size,
@@ -334,8 +425,27 @@ def main() -> None:
                 f"{info['n_positive_positions']:>6d}"
             )
 
+    held_out_results: dict[str, object] | None = None
+    if args.gene_held_out:
+        print(f"\nGene-held-out evaluation (test_fraction={args.test_fraction})...")
+        gene_idx_arr = dataset._gene_idx[sub_idx]
+        held_out_results = gene_held_out_scores(
+            activations, labels, gene_idx_arr,
+            dataset.tf_names, args.top_n_features,
+            test_fraction=args.test_fraction,
+            seed=args.seed,
+        )
+        print(f"\n{'TF':<30}  {'feat':>6}  {'train':>6}  {'test':>6}  {'n_test_pos':>10}")
+        print("-" * 65)
+        for tf_name, info in sorted(
+            held_out_results.items(), key=lambda kv: kv[1]["test_auroc"], reverse=True
+        )[:25]:
+            print(f"{tf_name:<30}  {info['best_feature']:>6d}  "
+                  f"{info['train_auroc']:>6.4f}  {info['test_auroc']:>6.4f}  "
+                  f"{info['n_test_pos']:>10d}")
+
     tf_results: dict[str, object] | None = None
-    if assignments is None or args.all_features:
+    if not args.gene_held_out and (assignments is None or args.all_features):
         print(f"Computing per-feature AUROC/AP for {dataset.n_tfs} TFs...")
         tf_results = per_feature_scores(
             activations, labels, dataset.tf_names, args.top_n_features
@@ -362,6 +472,8 @@ def main() -> None:
         "dead_fraction": dead_frac,
         "best_assignment_path": str(args.best_assignment_path) if args.best_assignment_path else None,
         "matched_features_only": assignments is not None and not args.all_features,
+        "eval_mode": "gene_held_out" if args.gene_held_out else "full",
+        "test_fraction": args.test_fraction if args.gene_held_out else None,
     }
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     if matched_results is not None:
@@ -370,6 +482,10 @@ def main() -> None:
         )
     if tf_results is not None:
         (args.output_dir / "tf_feature_scores.json").write_text(json.dumps(tf_results, indent=2))
+    if held_out_results is not None:
+        (args.output_dir / "tf_feature_scores_held_out.json").write_text(
+            json.dumps(held_out_results, indent=2)
+        )
 
     np.savez_compressed(
         args.output_dir / "activations.npz",

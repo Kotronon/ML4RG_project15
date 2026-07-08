@@ -29,12 +29,17 @@ NUM_WORKERS="${NUM_WORKERS:-0}"
 DEVICE="${DEVICE:-auto}"
 TOP_N_FEATURES="${TOP_N_FEATURES:-10}"
 MAX_EVAL_POSITIONS="${MAX_EVAL_POSITIONS:-500000}"
+GENE_HELD_OUT="${GENE_HELD_OUT:-false}"
+TEST_FRACTION="${TEST_FRACTION:-0.2}"
 BEST_ASSIGNMENT_PATH="${BEST_ASSIGNMENT_PATH:-}"
 ASSIGNMENT_METRIC="${ASSIGNMENT_METRIC:-jaccard}"
 ASSIGNMENT_DATASET="${ASSIGNMENT_DATASET:-DNA_rossi_chipexo}"
 ALL_FEATURES="${ALL_FEATURES:-false}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
+if [[ "${GENE_HELD_OUT}" == "true" ]]; then
+    EXTRA_ARGS="${EXTRA_ARGS} --gene-held-out"
+fi
 if [[ -n "${BEST_ASSIGNMENT_PATH}" ]]; then
     EXTRA_ARGS="${EXTRA_ARGS} --best-assignment-path ${BEST_ASSIGNMENT_PATH} --assignment-metric ${ASSIGNMENT_METRIC} --assignment-dataset ${ASSIGNMENT_DATASET}"
     if [[ "${ALL_FEATURES}" == "true" ]]; then
@@ -71,6 +76,7 @@ fi
     --device "${DEVICE}" \
     --top-n-features "${TOP_N_FEATURES}" \
     --max-eval-positions "${MAX_EVAL_POSITIONS}" \
+    --test-fraction "${TEST_FRACTION}" \
     ${EXTRA_ARGS}
 
 echo "SAE evaluation finished."
