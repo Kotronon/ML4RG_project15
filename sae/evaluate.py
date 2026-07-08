@@ -201,15 +201,11 @@ def per_feature_scores(
             continue
 
         aurocs = _auroc_all_features(acts_f32, y)
-        aps    = _ap_all_features(acts_f32, y)
 
         top_auroc = np.argsort(aurocs)[::-1][:top_n]
-        top_ap    = np.argsort(aps)[::-1][:top_n]
         results[tf_name] = {
             "best_features_auroc": [(int(i), float(aurocs[i])) for i in top_auroc],
-            "best_features_ap":    [(int(i), float(aps[i]))    for i in top_ap],
             "max_auroc": float(aurocs.max()),
-            "max_ap":    float(aps.max()),
             "mean_auroc": float(aurocs.mean()),
             "n_positive_positions": n_pos,
             "prevalence": float(n_pos) / len(y),
