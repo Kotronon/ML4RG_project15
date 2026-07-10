@@ -106,6 +106,11 @@ class DenseEpochStats:
     val_predicted_positive_rate: float | None = None
     val_average_precision: float | None = None
     val_roc_auc: float | None = None
+    val_dilated_micro_precision: float | None = None
+    val_dilated_micro_recall: float | None = None
+    val_dilated_micro_f1: float | None = None
+    val_dilated_average_precision: float | None = None
+    val_dilated_roc_auc: float | None = None
     window_loss: float | None = None
     window_micro_precision: float | None = None
     window_micro_recall: float | None = None
@@ -130,6 +135,11 @@ class DenseSplitStats:
     n_examples: int
     average_precision: float | None = None
     roc_auc: float | None = None
+    dilated_micro_precision: float | None = None
+    dilated_micro_recall: float | None = None
+    dilated_micro_f1: float | None = None
+    dilated_average_precision: float | None = None
+    dilated_roc_auc: float | None = None
     per_tf: list[dict[str, object]] | None = None
     window_loss: float | None = None
     window_micro_precision: float | None = None
@@ -653,6 +663,9 @@ def parse_args() -> argparse.Namespace:
             "val_average_precision",
             "val_roc_auc",
             "val_micro_f1",
+            "val_dilated_average_precision",
+            "val_dilated_roc_auc",
+            "val_dilated_micro_f1",
             "val_window_loss",
             "val_window_average_precision",
             "val_window_roc_auc",
@@ -660,7 +673,11 @@ def parse_args() -> argparse.Namespace:
             "train_loss",
         ),
         default="val_loss",
-        help="Metric used to choose best.pt. Loss is minimized; AP/AUROC/F1 are maximized.",
+        help=(
+            "Metric used to choose best.pt. Loss is minimized; AP/AUROC/F1 are "
+            "maximized. The val_dilated_* metrics compare predictions with the "
+            "label-smoothed evaluation target."
+        ),
     )
     parser.add_argument("--save-every", type=int, default=10)
     args = parser.parse_args()
@@ -1819,6 +1836,7 @@ def evaluate_dense(
     total_loss = 0.0
     total_examples = 0
     tp = fp = fn = 0.0
+    dilated_tp = dilated_fp = dilated_fn = 0.0
     predicted_positive = 0.0
     total_labels = 0.0
     window_loss_total = 0.0
@@ -1828,10 +1846,12 @@ def evaluate_dense(
     window_total_labels = 0.0
     micro_score_chunks: list[np.ndarray] = []
     micro_target_chunks: list[np.ndarray] = []
+    dilated_target_chunks: list[np.ndarray] = []
     window_score_chunks: list[np.ndarray] = []
     window_target_chunks: list[np.ndarray] = []
     per_tf_score_chunks: list[list[np.ndarray]] | None = None
     per_tf_target_chunks: list[list[np.ndarray]] | None = None
+    per_tf_dilated_target_chunks: list[list[np.ndarray]] | None = None
     selected_tf_names: list[str] | None = None
 
     if tf_names is not None:
@@ -1846,6 +1866,7 @@ def evaluate_dense(
             ]
         per_tf_score_chunks = [[] for _ in selected_tf_names]
         per_tf_target_chunks = [[] for _ in selected_tf_names]
+        per_tf_dilated_target_chunks = [[] for _ in selected_tf_names]
 
     with torch.no_grad():
         for batch in loader:
@@ -1871,6 +1892,7 @@ def evaluate_dense(
                 selected_tf_names = None
                 per_tf_score_chunks = None
                 per_tf_target_chunks = None
+                per_tf_dilated_target_chunks = None
             else:
                 outputs = forward_dense_model(model, x, model_tf_indices)
                 y = make_dense_targets(
@@ -1935,17 +1957,23 @@ def evaluate_dense(
             valid = mask.unsqueeze(1).expand_as(logits)
             pred = logits.sigmoid() >= 0.5
             target = hard_y >= 0.5
+            dilated_target = y >= 0.5
             tp += (pred & target & valid).sum().item()
             fp += (pred & ~target & valid).sum().item()
             fn += (~pred & target & valid).sum().item()
+            dilated_tp += (pred & dilated_target & valid).sum().item()
+            dilated_fp += (pred & ~dilated_target & valid).sum().item()
+            dilated_fn += (~pred & dilated_target & valid).sum().item()
             predicted_positive += (pred & valid).sum().item()
             total_labels += valid.sum().item()
 
             logits_cpu = logits.detach().cpu().numpy()
             target_cpu = target.detach().cpu().numpy()
+            dilated_target_cpu = dilated_target.detach().cpu().numpy()
             valid_cpu = valid.detach().cpu().numpy()
             micro_score_chunks.append(logits_cpu[valid_cpu])
             micro_target_chunks.append(target_cpu[valid_cpu])
+            dilated_target_chunks.append(dilated_target_cpu[valid_cpu])
             if window_logits is not None and window_targets is not None:
                 window_pred = window_logits.sigmoid() >= 0.5
                 window_target = window_targets >= 0.5
@@ -1963,6 +1991,7 @@ def evaluate_dense(
             if (
                 per_tf_score_chunks is not None
                 and per_tf_target_chunks is not None
+                and per_tf_dilated_target_chunks is not None
             ):
                 for local_tf_idx in range(logits_cpu.shape[1]):
                     tf_valid = valid_cpu[:, local_tf_idx, :]
@@ -1972,11 +2001,33 @@ def evaluate_dense(
                     per_tf_target_chunks[local_tf_idx].append(
                         target_cpu[:, local_tf_idx, :][tf_valid]
                     )
+                    per_tf_dilated_target_chunks[local_tf_idx].append(
+                        dilated_target_cpu[:, local_tf_idx, :][tf_valid]
+                    )
 
     precision = tp / (tp + fp) if (tp + fp) else 0.0
     recall = tp / (tp + fn) if (tp + fn) else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
     average_precision, roc_auc = score_metrics(micro_score_chunks, micro_target_chunks)
+    dilated_precision = (
+        dilated_tp / (dilated_tp + dilated_fp)
+        if (dilated_tp + dilated_fp)
+        else 0.0
+    )
+    dilated_recall = (
+        dilated_tp / (dilated_tp + dilated_fn)
+        if (dilated_tp + dilated_fn)
+        else 0.0
+    )
+    dilated_f1 = (
+        2 * dilated_precision * dilated_recall / (dilated_precision + dilated_recall)
+        if (dilated_precision + dilated_recall)
+        else 0.0
+    )
+    dilated_average_precision, dilated_roc_auc = score_metrics(
+        micro_score_chunks,
+        dilated_target_chunks,
+    )
     window_precision = (
         window_tp / (window_tp + window_fp)
         if (window_tp + window_fp)
@@ -2005,15 +2056,27 @@ def evaluate_dense(
         selected_tf_names is not None
         and per_tf_score_chunks is not None
         and per_tf_target_chunks is not None
+        and per_tf_dilated_target_chunks is not None
     ):
         per_tf_metrics = []
-        for name, score_chunk, target_chunk in zip(
+        for name, score_chunk, target_chunk, dilated_target_chunk in zip(
             selected_tf_names,
             per_tf_score_chunks,
             per_tf_target_chunks,
+            per_tf_dilated_target_chunks,
         ):
             tf_ap, tf_auc = score_metrics(score_chunk, target_chunk)
+            tf_dilated_ap, tf_dilated_auc = score_metrics(
+                score_chunk,
+                dilated_target_chunk,
+            )
             n_pos = int(sum(chunk.astype(bool, copy=False).sum() for chunk in target_chunk))
+            n_dilated_pos = int(
+                sum(
+                    chunk.astype(bool, copy=False).sum()
+                    for chunk in dilated_target_chunk
+                )
+            )
             n_total = int(sum(len(chunk) for chunk in target_chunk))
             per_tf_metrics.append(
                 {
@@ -2021,6 +2084,9 @@ def evaluate_dense(
                     "average_precision": tf_ap,
                     "roc_auc": tf_auc,
                     "positives": n_pos,
+                    "dilated_average_precision": tf_dilated_ap,
+                    "dilated_roc_auc": tf_dilated_auc,
+                    "dilated_positives": n_dilated_pos,
                     "valid_positions": n_total,
                 }
             )
@@ -2033,6 +2099,11 @@ def evaluate_dense(
         n_examples=total_examples,
         average_precision=average_precision,
         roc_auc=roc_auc,
+        dilated_micro_precision=dilated_precision,
+        dilated_micro_recall=dilated_recall,
+        dilated_micro_f1=dilated_f1,
+        dilated_average_precision=dilated_average_precision,
+        dilated_roc_auc=dilated_roc_auc,
         per_tf=per_tf_metrics,
         window_loss=(
             window_loss_total / max(window_batches, 1)
@@ -2060,6 +2131,11 @@ def attach_val_stats(stats: DenseEpochStats, val_stats: DenseSplitStats) -> Dens
     stats.val_predicted_positive_rate = val_stats.predicted_positive_rate
     stats.val_average_precision = val_stats.average_precision
     stats.val_roc_auc = val_stats.roc_auc
+    stats.val_dilated_micro_precision = val_stats.dilated_micro_precision
+    stats.val_dilated_micro_recall = val_stats.dilated_micro_recall
+    stats.val_dilated_micro_f1 = val_stats.dilated_micro_f1
+    stats.val_dilated_average_precision = val_stats.dilated_average_precision
+    stats.val_dilated_roc_auc = val_stats.dilated_roc_auc
     stats.val_window_loss = val_stats.window_loss
     stats.val_window_micro_precision = val_stats.window_micro_precision
     stats.val_window_micro_recall = val_stats.window_micro_recall
@@ -2433,6 +2509,12 @@ def main() -> None:
                 message += f" val_ap={stats.val_average_precision:.4f}"
             if stats.val_roc_auc is not None:
                 message += f" val_roc_auc={stats.val_roc_auc:.4f}"
+            if stats.val_dilated_micro_f1 is not None:
+                message += f" val_dilated_f1={stats.val_dilated_micro_f1:.4f}"
+            if stats.val_dilated_average_precision is not None:
+                message += f" val_dilated_ap={stats.val_dilated_average_precision:.4f}"
+            if stats.val_dilated_roc_auc is not None:
+                message += f" val_dilated_roc_auc={stats.val_dilated_roc_auc:.4f}"
             if stats.val_window_loss is not None:
                 message += (
                     f" val_window_loss={stats.val_window_loss:.5f} "
