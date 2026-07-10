@@ -84,6 +84,7 @@ PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_motif_cnn",
     "dense_protein_residual_bilinear_cnn",
     "dense_protein_direct_scorer_cnn",
+    "dense_protein_film_motif_cnn",
     "dense_protein_window_localization_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
@@ -570,6 +571,15 @@ def parse_args() -> argparse.Namespace:
         default="tf",
         help="Optional additive bias terms in the protein-conditioned scorer.",
     )
+    parser.add_argument(
+        "--film-eval-tf-chunk-size",
+        type=int,
+        default=1,
+        help=(
+            "Number of TFs jointly evaluated by dense_protein_film_motif_cnn. "
+            "Smaller values use less GPU memory when every base is scored."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -819,6 +829,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--scorer-pair-dim must be positive")
     if args.scorer_hidden_dim <= 0:
         raise ValueError("--scorer-hidden-dim must be positive")
+    if args.film_eval_tf_chunk_size <= 0:
+        raise ValueError("--film-eval-tf-chunk-size must be positive")
     if args.label_smoothing_radius_bp < 0:
         raise ValueError("--label-smoothing-radius-bp must be non-negative")
     if args.label_smoothing_sigma_bp is not None and args.label_smoothing_sigma_bp <= 0:
@@ -1509,6 +1521,7 @@ def model_config_from_args(
         "scorer_pair_dim": args.scorer_pair_dim,
         "scorer_hidden_dim": args.scorer_hidden_dim,
         "scorer_bias_mode": args.scorer_bias_mode,
+        "film_eval_tf_chunk_size": args.film_eval_tf_chunk_size,
         "embeddings_path": str(args.embeddings_path) if args.embeddings_path else None,
         "embedding_column": args.embedding_column,
         "embedding_key_column": args.embedding_key_column,
@@ -1561,6 +1574,7 @@ def align_dna_branch_args_from_checkpoint(
     dna_branch_models = {
         "dense_protein_residual_bilinear_cnn",
         "dense_protein_direct_scorer_cnn",
+        "dense_protein_film_motif_cnn",
         "dense_protein_window_localization_cnn",
     }
     if args.model not in dna_branch_models or args.pretrained_dna_checkpoint is None:
@@ -1578,6 +1592,7 @@ def align_dna_branch_args_from_checkpoint(
         "dense_motif_dilated_attention_cnn",
         "dense_protein_residual_bilinear_cnn",
         "dense_protein_direct_scorer_cnn",
+        "dense_protein_film_motif_cnn",
         "dense_protein_window_localization_cnn",
     }:
         raise ValueError(
@@ -2432,6 +2447,7 @@ def main() -> None:
         scorer_pair_dim=args.scorer_pair_dim,
         scorer_hidden_dim=args.scorer_hidden_dim,
         scorer_bias_mode=args.scorer_bias_mode,
+        film_eval_tf_chunk_size=args.film_eval_tf_chunk_size,
         window_pooling=args.window_pooling,
         window_pooling_top_k=args.window_pooling_top_k,
     ).to(device)

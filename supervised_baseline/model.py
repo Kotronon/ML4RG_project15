@@ -1497,6 +1497,212 @@ class DenseProteinDirectScorerCNN(nn.Module):
         return self.scorer(dna_features, protein_features)
 
 
+class DenseProteinFiLMMotifCNN(DenseProteinDirectScorerCNN):
+    """Dense TFBS scorer that conditions the DNA encoder with FiLM.
+
+    A TF embedding generates feature-wise affine parameters after the motif
+    stem, each residual dilated block, and each local self-attention block.
+    Unlike late fusion, the TF therefore changes the DNA features that later
+    context blocks receive. The model still returns one score per DNA base.
+    """
+
+    def __init__(
+        self,
+        n_tfs: int,
+        tf_embeddings: torch.Tensor,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 128,
+        motif_kernel_sizes: tuple[int, ...] = (21,),
+        kernel_size: int = 7,
+        dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+        dropout: float = 0.1,
+        dna_attention_window_bp: int = 50,
+        dna_attention_layers: int = 2,
+        dna_attention_heads: int = 8,
+        dna_attention_ffn_multiplier: float = 4.0,
+        tf_embedding_dropout: float = 0.0,
+        protein_noise_std: float = 0.0,
+        protein_l2_normalize: bool = False,
+        scorer: str = "multihead_bilinear",
+        scorer_heads: int = 8,
+        scorer_pair_dim: int = 32,
+        scorer_hidden_dim: int = 128,
+        scorer_bias_mode: str = "tf",
+        film_eval_tf_chunk_size: int = 1,
+    ) -> None:
+        super().__init__(
+            n_tfs=n_tfs,
+            tf_embeddings=tf_embeddings,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            motif_kernel_sizes=motif_kernel_sizes,
+            kernel_size=kernel_size,
+            dilations=dilations,
+            dropout=dropout,
+            dna_attention_window_bp=dna_attention_window_bp,
+            dna_attention_layers=dna_attention_layers,
+            dna_attention_heads=dna_attention_heads,
+            dna_attention_ffn_multiplier=dna_attention_ffn_multiplier,
+            tf_embedding_dropout=tf_embedding_dropout,
+            protein_noise_std=protein_noise_std,
+            protein_l2_normalize=protein_l2_normalize,
+            scorer=scorer,
+            scorer_heads=scorer_heads,
+            scorer_pair_dim=scorer_pair_dim,
+            scorer_hidden_dim=scorer_hidden_dim,
+            scorer_bias_mode=scorer_bias_mode,
+        )
+        if film_eval_tf_chunk_size <= 0:
+            raise ValueError("film_eval_tf_chunk_size must be positive")
+
+        self.hidden_channels = int(hidden_channels)
+        self.film_eval_tf_chunk_size = int(film_eval_tf_chunk_size)
+        self.n_film_sites = (
+            1
+            + len(self.dna_model.context_blocks)
+            + len(self.dna_model.attention_blocks)
+        )
+        self.film_generator = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.GELU(),
+            nn.Linear(hidden_channels, self.n_film_sites * 2 * hidden_channels),
+        )
+
+        # FiLM starts as the identity so a pretrained DNA encoder is not
+        # disrupted before protein-conditioned gradients have shaped the adapter.
+        final_layer = self.film_generator[-1]
+        if not isinstance(final_layer, nn.Linear):
+            raise TypeError("FiLM generator must end in a linear layer")
+        nn.init.zeros_(final_layer.weight)
+        nn.init.zeros_(final_layer.bias)
+
+    def _film_parameters(
+        self,
+        protein_features: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        parameters = self.film_generator(protein_features).view(
+            protein_features.shape[0],
+            self.n_film_sites,
+            2,
+            self.hidden_channels,
+        )
+        # Bound scales make early fine-tuning of the frozen/pretrained encoder
+        # substantially more stable than unconstrained affine modulation.
+        gamma = parameters[:, :, 0, :].tanh()
+        beta = parameters[:, :, 1, :]
+        return gamma, beta
+
+    @staticmethod
+    def _apply_film_conv(
+        x: torch.Tensor,
+        gamma: torch.Tensor,
+        beta: torch.Tensor,
+    ) -> torch.Tensor:
+        return x * (1.0 + gamma.unsqueeze(-1)) + beta.unsqueeze(-1)
+
+    @staticmethod
+    def _apply_film_sequence(
+        x: torch.Tensor,
+        gamma: torch.Tensor,
+        beta: torch.Tensor,
+    ) -> torch.Tensor:
+        return x * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
+
+    def _encode_pairwise_conditioned(
+        self,
+        x: torch.Tensor,
+        protein_features: torch.Tensor,
+    ) -> torch.Tensor:
+        if protein_features.ndim != 2 or protein_features.shape[0] != x.shape[0]:
+            raise ValueError(
+                "Pairwise protein features must have shape [batch, hidden_channels]"
+            )
+        gamma, beta = self._film_parameters(protein_features)
+
+        dna = torch.cat([conv(x) for conv in self.dna_model.motif_stem], dim=1)
+        dna = self.dna_model.stem_dropout(
+            self.dna_model.stem_activation(self.dna_model.stem_norm(dna))
+        )
+        film_index = 0
+        dna = self._apply_film_conv(dna, gamma[:, film_index], beta[:, film_index])
+        film_index += 1
+
+        for block in self.dna_model.context_blocks:
+            dna = block(dna)
+            dna = self._apply_film_conv(dna, gamma[:, film_index], beta[:, film_index])
+            film_index += 1
+
+        dna = dna.transpose(1, 2)
+        for block in self.dna_model.attention_blocks:
+            dna = block(dna)
+            dna = self._apply_film_sequence(
+                dna,
+                gamma[:, film_index],
+                beta[:, film_index],
+            )
+            film_index += 1
+
+        if film_index != self.n_film_sites:
+            raise RuntimeError("FiLM site count does not match DNA encoder blocks")
+        return dna
+
+    def _score_pairwise(
+        self,
+        x: torch.Tensor,
+        protein_features: torch.Tensor,
+    ) -> torch.Tensor:
+        dna_features = self.dna_adapter(
+            self._encode_pairwise_conditioned(x, protein_features)
+        )
+        return self.scorer.forward_pairwise(dna_features, protein_features)
+
+    def _score_all_tfs(
+        self,
+        x: torch.Tensor,
+        protein_features: torch.Tensor,
+    ) -> torch.Tensor:
+        """Score all requested TFs in memory-safe chunks during dense evaluation."""
+        batch_size = x.shape[0]
+        outputs = []
+        for protein_chunk in protein_features.split(self.film_eval_tf_chunk_size, dim=0):
+            n_chunk_tfs = protein_chunk.shape[0]
+            expanded_x = (
+                x.unsqueeze(1)
+                .expand(-1, n_chunk_tfs, -1, -1)
+                .reshape(batch_size * n_chunk_tfs, x.shape[1], x.shape[2])
+            )
+            expanded_proteins = (
+                protein_chunk.unsqueeze(0)
+                .expand(batch_size, -1, -1)
+                .reshape(batch_size * n_chunk_tfs, self.hidden_channels)
+            )
+            logits = self._score_pairwise(expanded_x, expanded_proteins)
+            outputs.append(logits.view(batch_size, n_chunk_tfs, x.shape[-1]))
+        return torch.cat(outputs, dim=1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        tf_indices: torch.Tensor | None = None,
+        pairwise_tf_indices: bool = False,
+    ) -> torch.Tensor:
+        if pairwise_tf_indices:
+            if (
+                tf_indices is None
+                or tf_indices.ndim != 1
+                or tf_indices.shape[0] != x.shape[0]
+            ):
+                raise ValueError(
+                    "pairwise_tf_indices=True requires tf_indices with shape [batch]"
+                )
+            return self._score_pairwise(x, self._protein_features(tf_indices))
+
+        return self._score_all_tfs(x, self._protein_features(tf_indices))
+
+
 class DenseProteinWindowLocalizationCNN(DenseProteinDirectScorerCNN):
     """Protein-conditioned localization model with coupled window evidence.
 
@@ -1717,6 +1923,7 @@ DENSE_MODEL_NAMES = (
     "dense_motif_dilated_attention_cnn",
     "dense_protein_residual_bilinear_cnn",
     "dense_protein_direct_scorer_cnn",
+    "dense_protein_film_motif_cnn",
     "dense_protein_window_localization_cnn",
     "dense_protein_res_dilated_cnn",
     "dense_protein_local_attention",
@@ -1812,6 +2019,7 @@ def build_dense_model(
     scorer_pair_dim: int = 32,
     scorer_hidden_dim: int = 128,
     scorer_bias_mode: str = "tf",
+    film_eval_tf_chunk_size: int = 1,
     window_pooling: str = "topk_logmeanexp",
     window_pooling_top_k: int = 10,
 ) -> nn.Module:
@@ -1898,6 +2106,32 @@ def build_dense_model(
             scorer_pair_dim=scorer_pair_dim,
             scorer_hidden_dim=scorer_hidden_dim,
             scorer_bias_mode=scorer_bias_mode,
+        )
+    if model_name == "dense_protein_film_motif_cnn":
+        if tf_embeddings is None:
+            raise ValueError("dense_protein_film_motif_cnn requires tf_embeddings")
+        return DenseProteinFiLMMotifCNN(
+            n_tfs=n_tfs,
+            tf_embeddings=tf_embeddings,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            motif_kernel_sizes=motif_kernel_sizes,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            dilations=dilations,
+            dna_attention_window_bp=dna_attention_window_bp,
+            dna_attention_layers=dna_attention_layers,
+            dna_attention_heads=dna_attention_heads,
+            dna_attention_ffn_multiplier=dna_attention_ffn_multiplier,
+            tf_embedding_dropout=tf_embedding_dropout,
+            protein_noise_std=protein_noise_std,
+            protein_l2_normalize=protein_l2_normalize,
+            scorer=scorer,
+            scorer_heads=scorer_heads,
+            scorer_pair_dim=scorer_pair_dim,
+            scorer_hidden_dim=scorer_hidden_dim,
+            scorer_bias_mode=scorer_bias_mode,
+            film_eval_tf_chunk_size=film_eval_tf_chunk_size,
         )
     if model_name == "dense_protein_window_localization_cnn":
         if tf_embeddings is None:
