@@ -123,6 +123,7 @@ class DenseEpochStats:
     val_window_predicted_positive_rate: float | None = None
     val_window_average_precision: float | None = None
     val_window_roc_auc: float | None = None
+    candidate_center_loss: float | None = None
 
 
 @dataclass
@@ -153,6 +154,7 @@ class DenseSplitStats:
 LABEL_MODES = ("tf", "merged_train_tfs")
 LOSS_NAMES = ("bce", "focal", "rank")
 TRAINING_WINDOW_MODES = ("full_promoter", "sampled_windows")
+FINAL_EVAL_SCOPES = ("all", "test_only")
 
 
 def parse_args() -> argparse.Namespace:
@@ -435,6 +437,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--candidate-center-loss-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Additional BCE/focal loss weight at the DNA-only proposed base "
+            "for candidate-anchored samples. This trains a TF-specific "
+            "reranker while preserving the dense localization objective."
+        ),
+    )
+    parser.add_argument(
         "--sampled-window-margin-bp",
         type=int,
         default=30,
@@ -679,6 +691,25 @@ def parse_args() -> argparse.Namespace:
             "label-smoothed evaluation target."
         ),
     )
+    parser.add_argument(
+        "--final-eval-scope",
+        choices=FINAL_EVAL_SCOPES,
+        default="all",
+        help=(
+            "Final metric slices to compute. 'test_only' evaluates only "
+            "test promoters against held-out test TFs (or the ordinary test "
+            "split), avoiding very large all-pair train evaluations."
+        ),
+    )
+    parser.add_argument(
+        "--evaluate-only",
+        action="store_true",
+        help=(
+            "Load output-dir/best.pt and run final evaluation without taking "
+            "an optimization step. Pass the same dataset and model arguments "
+            "used to train that checkpoint."
+        ),
+    )
     parser.add_argument("--save-every", type=int, default=10)
     args = parser.parse_args()
     if args.input_mode == "embedding" and args.embeddings_path is None:
@@ -729,6 +760,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--sampled-window-candidate-fraction must be in [0, 1]")
     if not 0.0 <= args.candidate_tf_positive_fraction <= 1.0:
         raise ValueError("--candidate-tf-positive-fraction must be in [0, 1]")
+    if args.candidate_center_loss_weight < 0:
+        raise ValueError("--candidate-center-loss-weight must be non-negative")
     if (
         args.sampled_window_positive_fraction
         + args.sampled_window_hard_negative_fraction
@@ -742,6 +775,19 @@ def parse_args() -> argparse.Namespace:
         raise ValueError(
             "--candidate-windows-path is required when "
             "--sampled-window-candidate-fraction > 0"
+        )
+    if (
+        args.candidate_center_loss_weight > 0
+        and args.sampled_window_candidate_fraction <= 0
+    ):
+        raise ValueError(
+            "--candidate-center-loss-weight requires "
+            "--sampled-window-candidate-fraction > 0"
+        )
+    if args.candidate_center_loss_weight > 0 and args.loss == "rank":
+        raise ValueError(
+            "--candidate-center-loss-weight is supported with BCE or focal loss, "
+            "not the position-ranking objective"
         )
     if args.sampled_window_margin_bp < 0:
         raise ValueError("--sampled-window-margin-bp must be non-negative")
@@ -785,6 +831,11 @@ def parse_args() -> argparse.Namespace:
     parse_int_tuple(args.motif_kernel_sizes)
     if args.output_dir is None:
         args.output_dir = DEFAULT_MODEL_ROOT / f"promoter_{args.input_mode}_{args.model}"
+    if args.evaluate_only and not (args.output_dir / "best.pt").is_file():
+        raise ValueError(
+            "--evaluate-only requires an existing best.pt in --output-dir: "
+            f"{args.output_dir / 'best.pt'}"
+        )
     return args
 
 
@@ -1084,6 +1135,10 @@ def collate_promoter_batch(
         "hard_y": hard_y_batch,
         "mask": mask_batch,
         "meta": [item["meta"] for item in items],
+        "candidate_center_offset": torch.tensor(
+            [int(item.get("candidate_center_offset", -1)) for item in items],
+            dtype=torch.long,
+        ),
     }
     if "tf_idx" in items[0]:
         batch["tf_idx"] = torch.tensor(
@@ -1290,6 +1345,29 @@ def window_bce_loss(
     )
 
 
+def candidate_center_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    loss_name: str,
+    focal_gamma: float,
+    focal_alpha: float | None,
+) -> torch.Tensor:
+    """Binary TF-specific loss at a proposed DNA candidate position."""
+    if loss_name == "bce":
+        return F.binary_cross_entropy_with_logits(logits, targets)
+    if loss_name == "focal":
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        probabilities = logits.sigmoid()
+        p_t = probabilities * targets + (1.0 - probabilities) * (1.0 - targets)
+        loss = bce * (1.0 - p_t).clamp_min(1e-6).pow(focal_gamma)
+        if focal_alpha is not None:
+            alpha_t = focal_alpha * targets + (1.0 - focal_alpha) * (1.0 - targets)
+            loss = loss * alpha_t
+        return loss.mean()
+    raise ValueError("Candidate-center loss supports only BCE or focal loss")
+
+
 def binary_average_precision(scores: np.ndarray, targets: np.ndarray) -> float | None:
     targets_bool = targets.astype(bool, copy=False)
     n_pos = int(targets_bool.sum())
@@ -1388,6 +1466,8 @@ def model_config_from_args(
         "sampled_window_hard_negative_fraction": (
             args.sampled_window_hard_negative_fraction
         ),
+        "candidate_center_loss_weight": args.candidate_center_loss_weight,
+        "final_eval_scope": args.final_eval_scope,
         "candidate_windows_path": (
             str(args.candidate_windows_path)
             if args.candidate_windows_path is not None
@@ -1652,6 +1732,7 @@ def train_one_epoch(
     rank_negative_weight: float,
     rank_negative_top_k: int,
     window_loss_weight: float,
+    candidate_center_loss_weight: float,
     epoch: int,
 ) -> DenseEpochStats:
     model.train()
@@ -1665,6 +1746,8 @@ def train_one_epoch(
     window_tp = window_fp = window_fn = 0.0
     window_predicted_positive = 0.0
     window_total_labels = 0.0
+    candidate_loss_total = 0.0
+    candidate_examples = 0
 
     for batch in loader:
         x = prepare_x(batch["x"].to(device, non_blocking=True), input_mode)
@@ -1674,6 +1757,10 @@ def train_one_epoch(
         batch_tf_indices = batch.get("tf_idx")
         if batch_tf_indices is not None:
             batch_tf_indices = batch_tf_indices.to(device, non_blocking=True)
+        candidate_center_offsets = batch["candidate_center_offset"].to(
+            device,
+            non_blocking=True,
+        )
 
         optimizer.zero_grad(set_to_none=True)
         if batch_tf_indices is not None:
@@ -1727,6 +1814,21 @@ def train_one_epoch(
             rank_negative_top_k=rank_negative_top_k,
         )
         loss = localization_loss
+        candidate_loss_value = None
+        if candidate_center_loss_weight > 0:
+            candidate_rows = candidate_center_offsets >= 0
+            if candidate_rows.any():
+                candidate_offsets = candidate_center_offsets[candidate_rows]
+                candidate_logits = logits[candidate_rows, 0, candidate_offsets]
+                candidate_targets = y[candidate_rows, 0, candidate_offsets]
+                candidate_loss_value = candidate_center_loss(
+                    candidate_logits,
+                    candidate_targets,
+                    loss_name=loss_name,
+                    focal_gamma=focal_gamma,
+                    focal_alpha=focal_alpha,
+                )
+                loss = loss + candidate_center_loss_weight * candidate_loss_value
         window_targets = None
         window_loss_value = None
         if window_logits is not None:
@@ -1747,6 +1849,10 @@ def train_one_epoch(
         if window_loss_value is not None:
             window_loss_total += float(window_loss_value.detach().cpu()) * batch_size
             window_batches += batch_size
+        if candidate_loss_value is not None:
+            n_candidates = int((candidate_center_offsets >= 0).sum().item())
+            candidate_loss_total += float(candidate_loss_value.detach().cpu()) * n_candidates
+            candidate_examples += n_candidates
 
         with torch.no_grad():
             valid = mask.unsqueeze(1).expand_as(logits)
@@ -1808,6 +1914,9 @@ def train_one_epoch(
             window_predicted_positive / max(window_total_labels, 1)
             if window_total_labels
             else None
+        ),
+        candidate_center_loss=(
+            candidate_loss_total / candidate_examples if candidate_examples else None
         ),
     )
 
@@ -2327,9 +2436,14 @@ def main() -> None:
         window_pooling_top_k=args.window_pooling_top_k,
     ).to(device)
 
-    if args.pretrained_dna_checkpoint is not None:
+    evaluation_checkpoint: dict[str, object] | None = None
+    if args.evaluate_only:
+        evaluation_checkpoint = load_checkpoint_cpu(args.output_dir / "best.pt")
+        model.load_state_dict(evaluation_checkpoint["model_state_dict"])
+        print(f"Loaded existing best checkpoint for evaluation: {args.output_dir / 'best.pt'}")
+    elif args.pretrained_dna_checkpoint is not None:
         load_pretrained_dna_branch(model, args.pretrained_dna_checkpoint, device)
-    if args.freeze_dna_branch:
+    if args.freeze_dna_branch and not args.evaluate_only:
         freeze_dna_branch(model)
         print("Frozen DNA branch.")
     print("Trainable parameters:", count_parameters(model))
@@ -2426,8 +2540,14 @@ def main() -> None:
     elif best_metric_name.startswith("val_"):
         print(f"Selection metric {best_metric_name!r} uses {validation_description}.")
     best_metric_value: float | None = None
+    if evaluation_checkpoint is not None:
+        checkpoint_stats = _checkpoint_dict(evaluation_checkpoint, "stats")
+        checkpoint_value = checkpoint_stats.get(best_metric_name)
+        if checkpoint_value is not None:
+            best_metric_value = float(checkpoint_value)
     history: list[dict[str, object]] = []
-    for epoch in range(1, args.epochs + 1):
+    epoch_iterable = () if args.evaluate_only else range(1, args.epochs + 1)
+    for epoch in epoch_iterable:
         stats = train_one_epoch(
             model=model,
             loader=train_loader,
@@ -2445,6 +2565,7 @@ def main() -> None:
             rank_negative_weight=args.rank_negative_weight,
             rank_negative_top_k=args.rank_negative_top_k,
             window_loss_weight=args.window_loss_weight,
+            candidate_center_loss_weight=args.candidate_center_loss_weight,
             epoch=epoch,
         )
         if use_val_for_selection and (
@@ -2499,6 +2620,8 @@ def main() -> None:
                 f"window_f1={stats.window_micro_f1 or 0.0:.4f} "
                 f"window_pred_pos={stats.window_predicted_positive_rate or 0.0:.5f}"
             )
+        if stats.candidate_center_loss is not None:
+            message += f" candidate_center_loss={stats.candidate_center_loss:.5f}"
         if stats.val_loss is not None:
             message += (
                 f" val_loss={stats.val_loss:.5f} "
@@ -2701,6 +2824,20 @@ def main() -> None:
             "test": (test_loader, None, None, "merged_train_tfs"),
         }
         eval_pos_weight = pos_weight
+
+    if args.final_eval_scope == "test_only":
+        preferred_test_job_names = ("test_promoters_test_tfs", "test")
+        final_jobs = {
+            name: final_jobs[name]
+            for name in preferred_test_job_names
+            if name in final_jobs
+        }
+        if not final_jobs:
+            raise ValueError(
+                "--final-eval-scope test_only requires a test evaluation slice"
+            )
+    print("Final evaluation slices:", list(final_jobs))
+
     for split_name, (
         split_loader,
         split_tf_tensor,

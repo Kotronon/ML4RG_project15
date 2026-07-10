@@ -1176,7 +1176,23 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
                 continue
             end = start + self.window_size
             record = self.base_dataset.records[anchor.promoter_idx]
-            overlapping_tfs = self._overlapping_tfs(record, start, end, buffer_bp=0)
+            candidate_center_offset = anchor.offset - start
+            if not 0 <= candidate_center_offset < self.window_size:
+                continue
+
+            # Candidate labels must describe the proposed locus itself, not an
+            # unrelated target-TF site somewhere else in the 200 bp crop. For
+            # hard-dilated training labels, permit the same radius around a site.
+            candidate_buffer_bp = (
+                self.base_dataset.label_smoothing_radius_bp
+                if self.base_dataset.label_smoothing_mode != "hard"
+                else 0
+            )
+            overlapping_tfs = self._tfs_near_point(
+                record,
+                anchor.offset,
+                buffer_bp=candidate_buffer_bp,
+            )
             if (
                 overlapping_tfs
                 and rng.random() < self.candidate_tf_positive_fraction
@@ -1187,6 +1203,7 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
                     tf_idx,
                     start,
                     "candidate_positive",
+                    candidate_center_offset=candidate_center_offset,
                 )
 
             non_overlapping_tfs = [
@@ -1202,6 +1219,7 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
                     tf_idx,
                     start,
                     sampling_kind,
+                    candidate_center_offset=candidate_center_offset,
                 )
 
             if overlapping_tfs:
@@ -1211,6 +1229,7 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
                     tf_idx,
                     start,
                     "candidate_positive_fallback",
+                    candidate_center_offset=candidate_center_offset,
                 )
 
         return self._sample_easy_negative(rng)
@@ -1323,6 +1342,8 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
         tf_idx: int,
         window_start: int,
         sampling_kind: str,
+        *,
+        candidate_center_offset: int | None = None,
     ) -> dict[str, object]:
         record = self.base_dataset.records[promoter_idx]
         window_end = window_start + self.window_size
@@ -1342,6 +1363,10 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
             "hard_y": torch.tensor(hard_labels, dtype=torch.float32),
             "mask": torch.tensor(mask, dtype=torch.bool),
             "tf_idx": torch.tensor(tf_idx, dtype=torch.long),
+            "candidate_center_offset": torch.tensor(
+                -1 if candidate_center_offset is None else candidate_center_offset,
+                dtype=torch.long,
+            ),
             "meta": {
                 "record_idx": promoter_idx,
                 "chrom": record.chrom,
@@ -1354,6 +1379,7 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
                 "tf_idx": tf_idx,
                 "tf_name": self.base_dataset.tf_names[tf_idx],
                 "sampling_kind": sampling_kind,
+                "candidate_center_offset": candidate_center_offset,
                 "has_positive_label": bool(hard_labels.any()),
             },
         }
@@ -1435,6 +1461,26 @@ class BindingBenchSampledPromoterWindowDataset(Dataset):
             if int(hi) > query_start and int(lo) < query_end:
                 return True
         return False
+
+    def _tfs_near_point(
+        self,
+        record: PromoterRecord,
+        point: int,
+        *,
+        buffer_bp: int,
+    ) -> list[int]:
+        """Return sampled TFs with a site at the proposed candidate locus."""
+        query_start = point - buffer_bp
+        query_end = point + buffer_bp + 1
+        return sorted(
+            {
+                int(tf_idx)
+                for tf_idx, lo, hi in record.label_intervals
+                if int(tf_idx) in self.tf_set
+                and int(hi) > query_start
+                and int(lo) < query_end
+            }
+        )
 
     def _has_any_tf_overlap(
         self,
