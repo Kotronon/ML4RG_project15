@@ -2481,24 +2481,27 @@ def main() -> None:
             },
         )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    save_json(args.output_dir / "tf_names.json", dataset.tf_names)
-    save_json(args.output_dir / "dataset_summary.json", dataset.summary())
-    if hasattr(train_dataset, "summary"):
-        save_json(args.output_dir / "train_dataset_summary.json", train_dataset.summary())
-    save_json(args.output_dir / "args.json", serializable_args(args))
-    save_json(
-        args.output_dir / "model_config.json",
-        model_config_from_args(args, input_channels, output_channels),
-    )
-    split_out = args.promoter_split_out or (args.output_dir / "promoter_split.json")
-    save_promoter_split(split_out, promoter_split)
-    print(f"Saved promoter split: {split_out}")
-    tf_split_out = args.tf_split_out or (args.output_dir / "tf_split.json")
-    save_tf_split(tf_split_out, tf_split)
-    print(f"Saved TF split: {tf_split_out}")
-    if tf_embedding_metadata is not None:
-        save_json(args.output_dir / "tf_embedding_metadata.json", tf_embedding_metadata)
+    if not args.evaluate_only:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        save_json(args.output_dir / "tf_names.json", dataset.tf_names)
+        save_json(args.output_dir / "dataset_summary.json", dataset.summary())
+        if hasattr(train_dataset, "summary"):
+            save_json(args.output_dir / "train_dataset_summary.json", train_dataset.summary())
+        save_json(args.output_dir / "args.json", serializable_args(args))
+        save_json(
+            args.output_dir / "model_config.json",
+            model_config_from_args(args, input_channels, output_channels),
+        )
+        split_out = args.promoter_split_out or (args.output_dir / "promoter_split.json")
+        save_promoter_split(split_out, promoter_split)
+        print(f"Saved promoter split: {split_out}")
+        tf_split_out = args.tf_split_out or (args.output_dir / "tf_split.json")
+        save_tf_split(tf_split_out, tf_split)
+        print(f"Saved TF split: {tf_split_out}")
+        if tf_embedding_metadata is not None:
+            save_json(args.output_dir / "tf_embedding_metadata.json", tf_embedding_metadata)
+    else:
+        print("Evaluation-only mode: preserving existing run metadata.")
 
     validation_loader = val_loader
     validation_model_tf_tensor = val_tf_tensor if use_tf_holdout and args.label_mode == "tf" else None
