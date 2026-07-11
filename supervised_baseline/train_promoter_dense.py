@@ -150,6 +150,9 @@ class DenseSplitStats:
     window_predicted_positive_rate: float | None = None
     window_average_precision: float | None = None
     window_roc_auc: float | None = None
+    promoter_pair_average_precision: float | None = None
+    promoter_pair_roc_auc: float | None = None
+    promoter_pair_per_tf: list[dict[str, object]] | None = None
 
 
 MULTITASK_LABEL_MODE = "tf_and_merged_train_tfs"
@@ -2025,9 +2028,13 @@ def evaluate_dense(
     dilated_target_chunks: list[np.ndarray] = []
     window_score_chunks: list[np.ndarray] = []
     window_target_chunks: list[np.ndarray] = []
+    promoter_pair_score_chunks: list[np.ndarray] = []
+    promoter_pair_target_chunks: list[np.ndarray] = []
     per_tf_score_chunks: list[list[np.ndarray]] | None = None
     per_tf_target_chunks: list[list[np.ndarray]] | None = None
     per_tf_dilated_target_chunks: list[list[np.ndarray]] | None = None
+    per_tf_promoter_pair_score_chunks: list[list[np.ndarray]] | None = None
+    per_tf_promoter_pair_target_chunks: list[list[np.ndarray]] | None = None
     selected_tf_names: list[str] | None = None
 
     if tf_names is not None:
@@ -2052,6 +2059,8 @@ def evaluate_dense(
         per_tf_score_chunks = [[] for _ in selected_tf_names]
         per_tf_target_chunks = [[] for _ in selected_tf_names]
         per_tf_dilated_target_chunks = [[] for _ in selected_tf_names]
+        per_tf_promoter_pair_score_chunks = [[] for _ in selected_tf_names]
+        per_tf_promoter_pair_target_chunks = [[] for _ in selected_tf_names]
 
     with torch.no_grad():
         for batch in loader:
@@ -2078,6 +2087,8 @@ def evaluate_dense(
                 per_tf_score_chunks = None
                 per_tf_target_chunks = None
                 per_tf_dilated_target_chunks = None
+                per_tf_promoter_pair_score_chunks = None
+                per_tf_promoter_pair_target_chunks = None
             else:
                 outputs = forward_dense_model(
                     model,
@@ -2169,6 +2180,17 @@ def evaluate_dense(
             micro_score_chunks.append(logits_cpu[valid_cpu])
             micro_target_chunks.append(target_cpu[valid_cpu])
             dilated_target_chunks.append(dilated_target_cpu[valid_cpu])
+
+            # This is a TransBind-like diagnostic only: a promoter-TF pair is
+            # positive when the TF has any annotated site in that promoter.
+            # Max pooling asks whether the dense model can surface at least one
+            # high-scoring locus, without changing its base-wise objective.
+            promoter_scores = logits.masked_fill(~valid, -torch.inf).amax(dim=-1)
+            promoter_targets = (target & valid).any(dim=-1)
+            promoter_scores_cpu = promoter_scores.detach().cpu().numpy()
+            promoter_targets_cpu = promoter_targets.detach().cpu().numpy()
+            promoter_pair_score_chunks.append(promoter_scores_cpu.reshape(-1))
+            promoter_pair_target_chunks.append(promoter_targets_cpu.reshape(-1))
             if window_logits is not None and window_targets is not None:
                 window_pred = window_logits.sigmoid() >= 0.5
                 window_target = window_targets >= 0.5
@@ -2187,6 +2209,8 @@ def evaluate_dense(
                 per_tf_score_chunks is not None
                 and per_tf_target_chunks is not None
                 and per_tf_dilated_target_chunks is not None
+                and per_tf_promoter_pair_score_chunks is not None
+                and per_tf_promoter_pair_target_chunks is not None
             ):
                 for local_tf_idx in range(logits_cpu.shape[1]):
                     tf_valid = valid_cpu[:, local_tf_idx, :]
@@ -2198,6 +2222,12 @@ def evaluate_dense(
                     )
                     per_tf_dilated_target_chunks[local_tf_idx].append(
                         dilated_target_cpu[:, local_tf_idx, :][tf_valid]
+                    )
+                    per_tf_promoter_pair_score_chunks[local_tf_idx].append(
+                        promoter_scores_cpu[:, local_tf_idx]
+                    )
+                    per_tf_promoter_pair_target_chunks[local_tf_idx].append(
+                        promoter_targets_cpu[:, local_tf_idx]
                     )
 
     precision = tp / (tp + fp) if (tp + fp) else 0.0
@@ -2246,14 +2276,22 @@ def evaluate_dense(
         window_score_chunks,
         window_target_chunks,
     )
+    promoter_pair_average_precision, promoter_pair_roc_auc = score_metrics(
+        promoter_pair_score_chunks,
+        promoter_pair_target_chunks,
+    )
     per_tf_metrics = None
+    promoter_pair_per_tf = None
     if (
         selected_tf_names is not None
         and per_tf_score_chunks is not None
         and per_tf_target_chunks is not None
         and per_tf_dilated_target_chunks is not None
+        and per_tf_promoter_pair_score_chunks is not None
+        and per_tf_promoter_pair_target_chunks is not None
     ):
         per_tf_metrics = []
+        promoter_pair_per_tf = []
         for name, score_chunk, target_chunk, dilated_target_chunk in zip(
             selected_tf_names,
             per_tf_score_chunks,
@@ -2283,6 +2321,25 @@ def evaluate_dense(
                     "dilated_roc_auc": tf_dilated_auc,
                     "dilated_positives": n_dilated_pos,
                     "valid_positions": n_total,
+                }
+            )
+        for name, score_chunk, target_chunk in zip(
+            selected_tf_names,
+            per_tf_promoter_pair_score_chunks,
+            per_tf_promoter_pair_target_chunks,
+        ):
+            tf_ap, tf_auc = score_metrics(score_chunk, target_chunk)
+            n_positive = int(
+                sum(chunk.astype(bool, copy=False).sum() for chunk in target_chunk)
+            )
+            n_pairs = int(sum(len(chunk) for chunk in target_chunk))
+            promoter_pair_per_tf.append(
+                {
+                    "tf_name": name,
+                    "average_precision": tf_ap,
+                    "roc_auc": tf_auc,
+                    "positive_promoters": n_positive,
+                    "promoter_tf_pairs": n_pairs,
                 }
             )
     return DenseSplitStats(
@@ -2315,6 +2372,9 @@ def evaluate_dense(
         ),
         window_average_precision=window_average_precision,
         window_roc_auc=window_roc_auc,
+        promoter_pair_average_precision=promoter_pair_average_precision,
+        promoter_pair_roc_auc=promoter_pair_roc_auc,
+        promoter_pair_per_tf=promoter_pair_per_tf,
     )
 
 
