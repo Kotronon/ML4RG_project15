@@ -1197,6 +1197,64 @@ class DenseMotifDilatedAttentionCNN(nn.Module):
         return self.score_features(self.encode(x))
 
 
+class DenseMotifDilatedAttentionMultiTaskCNN(DenseMotifDilatedAttentionCNN):
+    """DNA-only dense scorer with separate TF-specific and merged-site heads."""
+
+    def __init__(
+        self,
+        n_tfs: int,
+        *,
+        input_channels: int = 4,
+        hidden_channels: int = 128,
+        motif_kernel_sizes: tuple[int, ...] = (21,),
+        kernel_size: int = 7,
+        dilations: tuple[int, ...] = (1, 2, 4, 8, 16),
+        dropout: float = 0.1,
+        dna_attention_window_bp: int = 50,
+        dna_attention_layers: int = 2,
+        dna_attention_heads: int = 8,
+        dna_attention_ffn_multiplier: float = 4.0,
+    ) -> None:
+        if n_tfs < 2:
+            raise ValueError(
+                "DenseMotifDilatedAttentionMultiTaskCNN needs at least one "
+                "TF-specific output plus one merged output"
+            )
+        super().__init__(
+            n_tfs=1,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            motif_kernel_sizes=motif_kernel_sizes,
+            kernel_size=kernel_size,
+            dilations=dilations,
+            dropout=dropout,
+            dna_attention_window_bp=dna_attention_window_bp,
+            dna_attention_layers=dna_attention_layers,
+            dna_attention_heads=dna_attention_heads,
+            dna_attention_ffn_multiplier=dna_attention_ffn_multiplier,
+        )
+        del self.head
+        self.tf_head = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, n_tfs - 1),
+        )
+        self.merged_head = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, 1),
+        )
+
+    def score_features(self, dna: torch.Tensor) -> torch.Tensor:
+        tf_logits = self.tf_head(dna)
+        merged_logits = self.merged_head(dna)
+        return torch.cat([tf_logits, merged_logits], dim=-1).transpose(1, 2)
+
+
 class DenseProteinResidualBilinearCNN(nn.Module):
     """Protein-conditioned dense scorer built around a DNA-only prior.
 
@@ -1921,6 +1979,7 @@ DENSE_MODEL_NAMES = (
     "dense_small_cnn",
     "dense_res_dilated_cnn",
     "dense_motif_dilated_attention_cnn",
+    "dense_motif_dilated_attention_multitask_cnn",
     "dense_protein_residual_bilinear_cnn",
     "dense_protein_direct_scorer_cnn",
     "dense_protein_film_motif_cnn",
@@ -2041,6 +2100,20 @@ def build_dense_model(
         )
     if model_name == "dense_motif_dilated_attention_cnn":
         return DenseMotifDilatedAttentionCNN(
+            n_tfs=n_tfs,
+            input_channels=input_channels,
+            hidden_channels=hidden_channels,
+            motif_kernel_sizes=motif_kernel_sizes,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            dilations=dilations,
+            dna_attention_window_bp=dna_attention_window_bp,
+            dna_attention_layers=dna_attention_layers,
+            dna_attention_heads=dna_attention_heads,
+            dna_attention_ffn_multiplier=dna_attention_ffn_multiplier,
+        )
+    if model_name == "dense_motif_dilated_attention_multitask_cnn":
+        return DenseMotifDilatedAttentionMultiTaskCNN(
             n_tfs=n_tfs,
             input_channels=input_channels,
             hidden_channels=hidden_channels,

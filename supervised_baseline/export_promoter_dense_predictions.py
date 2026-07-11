@@ -160,7 +160,11 @@ def load_checkpoint(path: Path, device: torch.device) -> dict[str, object]:
 
 def get_device(requested: str) -> torch.device:
     if requested == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
     return torch.device(requested)
 
 
@@ -188,6 +192,7 @@ def resolve_export_config(
     saved_config = checkpoint_model_config(checkpoint)
 
     input_mode = str(args.input_mode or saved_config.get("input_mode", saved_args.get("input_mode", "raw")))
+    label_mode = str(saved_config.get("label_mode", saved_args.get("label_mode", "tf")))
     model_name = str(
         args.model
         or checkpoint.get("model_name")
@@ -357,7 +362,9 @@ def resolve_export_config(
 
     return {
         "input_mode": input_mode,
+        "label_mode": label_mode,
         "model_name": model_name,
+        "output_channels": saved_config.get("output_channels"),
         "hidden_channels": hidden_channels,
         "kernel_size": kernel_size,
         "dropout": float(dropout),
@@ -426,6 +433,35 @@ def infer_input_channels(dataset, input_mode: str) -> int:
     if input_mode == "embedding":
         return int(sample.shape[-1])
     return int(sample.shape[0])
+
+
+def resolve_output_feature_names(
+    *,
+    config: dict[str, object],
+    checkpoint_tf_names: list[object],
+) -> list[str]:
+    output_channels_raw = config.get("output_channels")
+    output_channels = (
+        int(output_channels_raw)
+        if output_channels_raw is not None
+        else len(checkpoint_tf_names)
+    )
+    if output_channels <= 0:
+        raise ValueError(f"Invalid output channel count: {output_channels}")
+
+    label_mode = str(config.get("label_mode", "tf"))
+    if label_mode == "merged_train_tfs" and output_channels == 1:
+        return ["merged_train_tfs"]
+    if (
+        label_mode == "tf_and_merged_train_tfs"
+        and output_channels == len(checkpoint_tf_names) + 1
+    ):
+        return [str(name) for name in checkpoint_tf_names] + ["merged_train_tfs"]
+    if output_channels == len(checkpoint_tf_names):
+        return [str(name) for name in checkpoint_tf_names]
+    if output_channels == 1:
+        return ["feature_0"]
+    return [f"feature_{idx}" for idx in range(output_channels)]
 
 
 def record_to_region(record: PromoterRecord) -> dict[str, object]:
@@ -675,6 +711,10 @@ def main() -> None:
             "Dataset TF order does not match checkpoint TF order. "
             "Export with the same sites/min-sites settings used for training."
         )
+    feature_names = resolve_output_feature_names(
+        config=config,
+        checkpoint_tf_names=tf_names,
+    )
 
     input_channels = int(
         checkpoint_model_config(checkpoint).get(
@@ -693,7 +733,7 @@ def main() -> None:
         )
     model = build_dense_model(
         str(config["model_name"]),
-        n_tfs=len(tf_names),
+        n_tfs=len(feature_names),
         input_channels=input_channels,
         tf_embeddings=tf_embeddings,
         hidden_channels=int(config["hidden_channels"]),
@@ -731,7 +771,7 @@ def main() -> None:
         if args.nms_radius_bp == 0
         else args.top_k_per_tf * args.pre_nms_factor
     )
-    topk = TopKBuffer(n_features=len(tf_names), k=candidate_k)
+    topk = TopKBuffer(n_features=len(feature_names), k=candidate_k)
     chrom_to_code: dict[str, int] = {}
     chrom_names: list[str] = []
 
@@ -756,7 +796,8 @@ def main() -> None:
     print(f"Input mode:           {config['input_mode']}")
     if config["model_name"] in PROTEIN_DENSE_MODEL_NAMES:
         print(f"TF embeddings:        {config['tf_embeddings_path']}")
-    print(f"TF outputs:           {len(tf_names)}")
+    print(f"Dataset TF labels:    {len(tf_names)}")
+    print(f"Model output features:{len(feature_names)}")
     print(f"Promoters:            {len(dataset)}")
     print(f"Top K per TF:         {args.top_k_per_tf}")
     print(f"Pre-NMS candidates:   {candidate_k}")
@@ -791,7 +832,7 @@ def main() -> None:
         predictions_out=args.predictions_out,
         feature_ranks_out=args.feature_ranks_out,
         topk=topk,
-        tf_names=[str(name) for name in tf_names],
+        tf_names=feature_names,
         chrom_names=chrom_names,
         records=dataset.records,
         nms_radius_bp=args.nms_radius_bp,
@@ -819,6 +860,8 @@ def main() -> None:
         "feature_rank_method": args.feature_rank_method,
         "n_scored_positions": n_scored_positions,
         "n_tfs": len(tf_names),
+        "n_output_features": len(feature_names),
+        "feature_names": feature_names,
         "model_config": {
             **config,
             "sites_path": str(config["sites_path"]),

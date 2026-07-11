@@ -152,7 +152,8 @@ class DenseSplitStats:
     window_roc_auc: float | None = None
 
 
-LABEL_MODES = ("tf", "merged_train_tfs")
+MULTITASK_LABEL_MODE = "tf_and_merged_train_tfs"
+LABEL_MODES = ("tf", "merged_train_tfs", MULTITASK_LABEL_MODE)
 LOSS_NAMES = ("bce", "focal", "rank")
 TRAINING_WINDOW_MODES = ("full_promoter", "sampled_windows")
 FINAL_EVAL_SCOPES = ("all", "test_only")
@@ -861,7 +862,11 @@ def set_seed(seed: int) -> None:
 
 def get_device(requested: str) -> torch.device:
     if requested == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
     return torch.device(requested)
 
 
@@ -1071,6 +1076,21 @@ def select_pos_weight_per_example(
     return flat.index_select(0, tf_indices).view(-1, 1, 1)
 
 
+def is_multitask_label_mode(label_mode: str) -> bool:
+    return label_mode == MULTITASK_LABEL_MODE
+
+
+def select_multitask_axis(
+    tensor: torch.Tensor,
+    tf_indices: torch.Tensor | None,
+) -> torch.Tensor:
+    if tf_indices is None:
+        return tensor
+    tf_part = tensor[:, :-1, ...].index_select(1, tf_indices)
+    merged_part = tensor[:, -1:, ...]
+    return torch.cat([tf_part, merged_part], dim=1)
+
+
 def make_dense_targets(
     y: torch.Tensor,
     *,
@@ -1083,6 +1103,11 @@ def make_dense_targets(
     if label_mode == "merged_train_tfs":
         selected = select_tf_axis(y, merge_tf_indices)
         return selected.amax(dim=1, keepdim=True)
+    if is_multitask_label_mode(label_mode):
+        tf_targets = select_tf_axis(y, model_tf_indices)
+        merged_source = select_tf_axis(y, merge_tf_indices)
+        merged_target = merged_source.amax(dim=1, keepdim=True)
+        return torch.cat([tf_targets, merged_target], dim=1)
     raise ValueError(f"Unknown label mode: {label_mode}")
 
 
@@ -1206,6 +1231,23 @@ def compute_merged_pos_weight(
     weight = negatives / max(positives, 1.0)
     weight = float(np.clip(weight, 1.0, 100.0))
     return torch.tensor([[[weight]]], dtype=torch.float32, device=device)
+
+
+def compute_multitask_pos_weight(
+    dataset,
+    device: torch.device,
+    *,
+    indices: list[int] | None = None,
+    tf_indices: list[int] | None = None,
+) -> torch.Tensor:
+    dense_weight = compute_dense_pos_weight(dataset, device, indices=indices)
+    merged_weight = compute_merged_pos_weight(
+        dataset,
+        device,
+        indices=indices,
+        tf_indices=tf_indices,
+    )
+    return torch.cat([dense_weight, merged_weight], dim=1)
 
 
 def dense_bce_loss(
@@ -1790,7 +1832,11 @@ def train_one_epoch(
                 batch_tf_indices,
             )
         else:
-            outputs = forward_dense_model(model, x, model_tf_indices)
+            outputs = forward_dense_model(
+                model,
+                x,
+                None if is_multitask_label_mode(label_mode) else model_tf_indices,
+            )
             y = make_dense_targets(
                 y,
                 label_mode=label_mode,
@@ -1808,7 +1854,13 @@ def train_one_epoch(
                 if pos_weight is not None and label_mode == "tf"
                 else pos_weight
             )
+            if pos_weight is not None and is_multitask_label_mode(label_mode):
+                batch_pos_weight = select_multitask_axis(pos_weight, model_tf_indices)
         logits, window_logits = split_dense_outputs(outputs)
+        if batch_tf_indices is None and is_multitask_label_mode(label_mode):
+            logits = select_multitask_axis(logits, model_tf_indices)
+            if window_logits is not None:
+                window_logits = select_multitask_axis(window_logits, model_tf_indices)
         if logits.shape != y.shape:
             raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
         if logits.shape != hard_y.shape:
@@ -1981,6 +2033,15 @@ def evaluate_dense(
     if tf_names is not None:
         if label_mode == "merged_train_tfs":
             selected_tf_names = [merged_label_name]
+        elif is_multitask_label_mode(label_mode):
+            if model_tf_indices is None:
+                selected_tf_names = [str(name) for name in tf_names]
+            else:
+                selected_tf_names = [
+                    str(tf_names[int(idx)])
+                    for idx in model_tf_indices.detach().cpu().numpy().tolist()
+                ]
+            selected_tf_names.append(merged_label_name)
         elif model_tf_indices is None:
             selected_tf_names = [str(name) for name in tf_names]
         else:
@@ -2018,7 +2079,11 @@ def evaluate_dense(
                 per_tf_target_chunks = None
                 per_tf_dilated_target_chunks = None
             else:
-                outputs = forward_dense_model(model, x, model_tf_indices)
+                outputs = forward_dense_model(
+                    model,
+                    x,
+                    None if is_multitask_label_mode(label_mode) else model_tf_indices,
+                )
                 y = make_dense_targets(
                     y,
                     label_mode=label_mode,
@@ -2038,7 +2103,13 @@ def evaluate_dense(
                 )
                 if label_mode != "tf":
                     batch_pos_weight = pos_weight
+                if pos_weight is not None and is_multitask_label_mode(label_mode):
+                    batch_pos_weight = select_multitask_axis(pos_weight, model_tf_indices)
             logits, window_logits = split_dense_outputs(outputs)
+            if batch_tf_indices is None and is_multitask_label_mode(label_mode):
+                logits = select_multitask_axis(logits, model_tf_indices)
+                if window_logits is not None:
+                    window_logits = select_multitask_axis(window_logits, model_tf_indices)
             if logits.shape != y.shape:
                 raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
             if logits.shape != hard_y.shape:
@@ -2350,7 +2421,12 @@ def main() -> None:
     input_channels = infer_input_channels(dataset, args.input_mode)
     align_dna_branch_args_from_checkpoint(args, input_channels=input_channels)
     dilations = parse_dilations(args.dilations)
-    output_channels = 1 if args.label_mode == "merged_train_tfs" else len(dataset.tf_names)
+    if args.label_mode == "merged_train_tfs":
+        output_channels = 1
+    elif is_multitask_label_mode(args.label_mode):
+        output_channels = len(dataset.tf_names) + 1
+    else:
+        output_channels = len(dataset.tf_names)
     print("Dataset:", dataset.summary())
     print("Promoter split:", promoter_split["counts"])
     print("TF split:", tf_split["counts"])
@@ -2484,6 +2560,13 @@ def main() -> None:
             indices=train_indices,
             tf_indices=train_tf_indices if use_tf_holdout else None,
         )
+    elif is_multitask_label_mode(args.label_mode):
+        pos_weight = compute_multitask_pos_weight(
+            dataset,
+            device,
+            indices=train_indices,
+            tf_indices=train_tf_indices if use_tf_holdout else None,
+        )
     else:
         pos_weight = compute_dense_pos_weight(dataset, device, indices=train_indices)
     if pos_weight is not None:
@@ -2524,6 +2607,12 @@ def main() -> None:
     validation_merge_tf_tensor = train_tf_tensor if args.label_mode == "merged_train_tfs" else None
     validation_merged_label_name = "merged_train_tfs"
     validation_description = "validation promoters"
+    if is_multitask_label_mode(args.label_mode):
+        validation_model_tf_tensor = train_tf_tensor if use_tf_holdout else None
+        validation_merge_tf_tensor = train_tf_tensor if use_tf_holdout else None
+        validation_description = (
+            "validation promoters with train TF heads and merged train TF union"
+        )
     if use_tf_holdout and args.label_mode == "tf":
         if validation_model_tf_tensor is not None and validation_loader is None:
             validation_loader = train_eval_loader
@@ -2574,8 +2663,17 @@ def main() -> None:
             device=device,
             input_mode=args.input_mode,
             pos_weight=pos_weight,
-            model_tf_indices=train_tf_tensor if args.label_mode == "tf" else None,
-            merge_tf_indices=train_tf_tensor if args.label_mode == "merged_train_tfs" else None,
+            model_tf_indices=(
+                train_tf_tensor
+                if args.label_mode == "tf" or is_multitask_label_mode(args.label_mode)
+                else None
+            ),
+            merge_tf_indices=(
+                train_tf_tensor
+                if args.label_mode == "merged_train_tfs"
+                or is_multitask_label_mode(args.label_mode)
+                else None
+            ),
             label_mode=args.label_mode,
             loss_name=args.loss,
             focal_gamma=args.focal_gamma,
@@ -2836,6 +2934,28 @@ def main() -> None:
                 "merged_test_tfs",
             )
         eval_pos_weight = pos_weight
+    elif use_tf_holdout and is_multitask_label_mode(args.label_mode):
+        final_jobs = {
+            "train_promoters_train_tfs_plus_merged_train_tfs": (
+                train_eval_loader,
+                train_tf_tensor,
+                train_tf_tensor,
+                "merged_train_tfs",
+            ),
+            "val_promoters_train_tfs_plus_merged_train_tfs": (
+                val_loader,
+                train_tf_tensor,
+                train_tf_tensor,
+                "merged_train_tfs",
+            ),
+            "test_promoters_train_tfs_plus_merged_train_tfs": (
+                test_loader,
+                train_tf_tensor,
+                train_tf_tensor,
+                "merged_train_tfs",
+            ),
+        }
+        eval_pos_weight = pos_weight
     else:
         final_jobs = {
             "train": (train_eval_loader, None, None, "merged_train_tfs"),
@@ -2869,7 +2989,10 @@ def main() -> None:
             continue
         if (
             use_tf_holdout
-            and args.label_mode == "merged_train_tfs"
+            and (
+                args.label_mode == "merged_train_tfs"
+                or is_multitask_label_mode(args.label_mode)
+            )
             and split_merge_tf_tensor is None
         ):
             continue
@@ -2879,10 +3002,15 @@ def main() -> None:
             device=device,
             input_mode=args.input_mode,
             pos_weight=eval_pos_weight,
-            model_tf_indices=split_tf_tensor if args.label_mode == "tf" else None,
+            model_tf_indices=(
+                split_tf_tensor
+                if args.label_mode == "tf" or is_multitask_label_mode(args.label_mode)
+                else None
+            ),
             merge_tf_indices=(
                 split_merge_tf_tensor
                 if args.label_mode == "merged_train_tfs"
+                or is_multitask_label_mode(args.label_mode)
                 else None
             ),
             label_mode=args.label_mode,
