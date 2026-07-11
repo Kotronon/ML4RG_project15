@@ -159,7 +159,7 @@ MULTITASK_LABEL_MODE = "tf_and_merged_train_tfs"
 LABEL_MODES = ("tf", "merged_train_tfs", MULTITASK_LABEL_MODE)
 LOSS_NAMES = ("bce", "focal", "rank")
 TRAINING_WINDOW_MODES = ("full_promoter", "sampled_windows")
-FINAL_EVAL_SCOPES = ("all", "test_only")
+FINAL_EVAL_SCOPES = ("all", "test_only", "val_only")
 DNA_FINETUNE_MODES = ("none", "upper", "all")
 
 
@@ -738,9 +738,18 @@ def parse_args() -> argparse.Namespace:
         choices=FINAL_EVAL_SCOPES,
         default="all",
         help=(
-            "Final metric slices to compute. 'test_only' evaluates only "
-            "test promoters against held-out test TFs (or the ordinary test "
-            "split), avoiding very large all-pair train evaluations."
+            "Final metric slices to compute. 'test_only' evaluates only test "
+            "promoters against held-out test TFs; 'val_only' evaluates only "
+            "validation promoters against held-out validation TFs. Both avoid "
+            "very large all-pair train evaluations."
+        ),
+    )
+    parser.add_argument(
+        "--final-metrics-out",
+        type=Path,
+        help=(
+            "Optional path for final_metrics JSON. Useful with --evaluate-only "
+            "to preserve an existing run's original final_metrics.json."
         ),
     )
     parser.add_argument(
@@ -3244,16 +3253,21 @@ def main() -> None:
         }
         eval_pos_weight = pos_weight
 
-    if args.final_eval_scope == "test_only":
-        preferred_test_job_names = ("test_promoters_test_tfs", "test")
+    if args.final_eval_scope in {"test_only", "val_only"}:
+        preferred_job_names = (
+            ("test_promoters_test_tfs", "test")
+            if args.final_eval_scope == "test_only"
+            else ("val_promoters_val_tfs", "val")
+        )
         final_jobs = {
             name: final_jobs[name]
-            for name in preferred_test_job_names
+            for name in preferred_job_names
             if name in final_jobs
         }
         if not final_jobs:
             raise ValueError(
-                "--final-eval-scope test_only requires a test evaluation slice"
+                f"--final-eval-scope {args.final_eval_scope} requires a matching "
+                "evaluation slice"
             )
     print("Final evaluation slices:", list(final_jobs))
 
@@ -3305,9 +3319,10 @@ def main() -> None:
             merged_label_name=merged_label_name,
         )
         final_metrics[split_name] = asdict(split_stats)
-    save_json(args.output_dir / "final_metrics.json", final_metrics)
+    final_metrics_path = args.final_metrics_out or (args.output_dir / "final_metrics.json")
+    save_json(final_metrics_path, final_metrics)
     print("Final metrics:", final_metrics)
-    print(f"Saved outputs to: {args.output_dir}")
+    print(f"Saved final metrics to: {final_metrics_path}")
 
 
 if __name__ == "__main__":
