@@ -160,6 +160,7 @@ LABEL_MODES = ("tf", "merged_train_tfs", MULTITASK_LABEL_MODE)
 LOSS_NAMES = ("bce", "focal", "rank")
 TRAINING_WINDOW_MODES = ("full_promoter", "sampled_windows")
 FINAL_EVAL_SCOPES = ("all", "test_only")
+DNA_FINETUNE_MODES = ("none", "upper", "all")
 
 
 def parse_args() -> argparse.Namespace:
@@ -533,11 +534,38 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        help=(
+            "Load a complete model checkpoint and continue training from its "
+            "weights with a freshly initialized optimizer. This is intended for "
+            "second-stage fine-tuning of a protein-conditioned model."
+        ),
+    )
+    parser.add_argument(
         "--freeze-dna-branch",
         action="store_true",
         help=(
             "Freeze the initialized DNA branch and keep it in eval mode during "
             "training. Intended for the first residual protein-conditioning run."
+        ),
+    )
+    parser.add_argument(
+        "--dna-finetune-mode",
+        choices=DNA_FINETUNE_MODES,
+        default="none",
+        help=(
+            "DNA parameters to unfreeze after --resume-checkpoint. 'upper' "
+            "unfreezes the final dilated context block and final local-attention "
+            "block; 'all' unfreezes the full DNA encoder."
+        ),
+    )
+    parser.add_argument(
+        "--dna-finetune-lr",
+        type=float,
+        help=(
+            "Learning rate for DNA parameters selected by --dna-finetune-mode. "
+            "The remaining trainable parameters use --lr."
         ),
     )
     parser.add_argument(
@@ -815,6 +843,33 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--label-mode merged_train_tfs is intended for DNA-only models")
     if args.freeze_dna_branch and args.pretrained_dna_checkpoint is None:
         raise ValueError("--freeze-dna-branch requires --pretrained-dna-checkpoint")
+    if args.resume_checkpoint is not None:
+        if not args.resume_checkpoint.is_file():
+            raise ValueError(
+                f"--resume-checkpoint does not exist: {args.resume_checkpoint}"
+            )
+        if args.pretrained_dna_checkpoint is not None:
+            raise ValueError(
+                "--resume-checkpoint and --pretrained-dna-checkpoint are mutually exclusive"
+            )
+        if args.freeze_dna_branch:
+            raise ValueError(
+                "--resume-checkpoint cannot be combined with --freeze-dna-branch; "
+                "use --dna-finetune-mode instead"
+            )
+        if args.evaluate_only:
+            raise ValueError(
+                "--resume-checkpoint cannot be combined with --evaluate-only"
+            )
+    elif args.dna_finetune_mode != "none":
+        raise ValueError("--dna-finetune-mode requires --resume-checkpoint")
+    if args.dna_finetune_mode != "none":
+        if args.dna_finetune_lr is None or args.dna_finetune_lr <= 0:
+            raise ValueError(
+                "--dna-finetune-lr must be positive when --dna-finetune-mode is enabled"
+            )
+    elif args.dna_finetune_lr is not None:
+        raise ValueError("--dna-finetune-lr requires --dna-finetune-mode")
     if not 0.0 <= args.tf_embedding_dropout < 1.0:
         raise ValueError("--tf-embedding-dropout must be in [0, 1)")
     if args.dna_attention_window_bp < 0:
@@ -1559,7 +1614,12 @@ def model_config_from_args(
             if args.pretrained_dna_checkpoint
             else None
         ),
+        "resume_checkpoint": (
+            str(args.resume_checkpoint) if args.resume_checkpoint else None
+        ),
         "freeze_dna_branch": args.freeze_dna_branch,
+        "dna_finetune_mode": args.dna_finetune_mode,
+        "dna_finetune_lr": args.dna_finetune_lr,
         "shuffle_tf_embeddings": args.shuffle_tf_embeddings,
         "scorer": args.scorer,
         "scorer_heads": args.scorer_heads,
@@ -1739,6 +1799,165 @@ def freeze_dna_branch(model: torch.nn.Module) -> None:
     freeze_method()
 
 
+def load_resume_checkpoint(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    *,
+    expected_model_name: str,
+    expected_tf_names: list[str],
+) -> dict[str, object]:
+    """Restore a complete model state while keeping a fresh optimizer."""
+    checkpoint = load_checkpoint_cpu(checkpoint_path)
+    config = _checkpoint_dict(checkpoint, "model_config")
+    saved_args = _checkpoint_dict(checkpoint, "args")
+    checkpoint_model = str(
+        checkpoint.get("model_name")
+        or config.get("model_name")
+        or saved_args.get("model", "")
+    )
+    if checkpoint_model != expected_model_name:
+        raise ValueError(
+            "Resume checkpoint model does not match this run: "
+            f"checkpoint has {checkpoint_model!r}, requested {expected_model_name!r}"
+        )
+
+    checkpoint_tf_names = checkpoint.get("tf_names")
+    if checkpoint_tf_names is not None and list(checkpoint_tf_names) != expected_tf_names:
+        raise ValueError(
+            "Resume checkpoint TF order does not match the current dataset. "
+            "Use the identical sites file, TF embedding table, and TF filtering options."
+        )
+
+    state = checkpoint.get("model_state_dict")
+    if not isinstance(state, dict):
+        raise ValueError(f"Resume checkpoint has no model_state_dict: {checkpoint_path}")
+    model.load_state_dict(state, strict=True)
+    print(
+        "Resumed complete model checkpoint with a fresh optimizer:",
+        {"checkpoint": str(checkpoint_path), "epoch": checkpoint.get("epoch")},
+    )
+    return checkpoint
+
+
+def configure_dna_finetuning(
+    model: torch.nn.Module,
+    mode: str,
+) -> int:
+    """Freeze a resumed DNA branch except for the requested upper layers."""
+    dna_model = getattr(model, "dna_model", None)
+    if dna_model is None:
+        raise ValueError(f"Model {type(model).__name__} has no DNA branch to fine-tune")
+    if mode not in DNA_FINETUNE_MODES:
+        raise ValueError(f"Unknown DNA fine-tune mode: {mode!r}")
+
+    for parameter in dna_model.parameters():
+        parameter.requires_grad = False
+
+    unfrozen_modules: list[torch.nn.Module] = []
+    if mode == "upper":
+        context_blocks = getattr(dna_model, "context_blocks", ())
+        attention_blocks = getattr(dna_model, "attention_blocks", ())
+        if context_blocks:
+            unfrozen_modules.append(context_blocks[-1])
+        if attention_blocks:
+            unfrozen_modules.append(attention_blocks[-1])
+        if not unfrozen_modules:
+            raise ValueError("DNA encoder has no upper context blocks to fine-tune")
+    elif mode == "all":
+        unfrozen_modules.append(dna_model)
+
+    for module in unfrozen_modules:
+        for parameter in module.parameters():
+            parameter.requires_grad = True
+
+    # DenseProteinDirectScorerCNN keeps the entire DNA branch in eval mode only
+    # for first-stage frozen runs. Partial fine-tuning needs model.train() to
+    # reach the selected upper blocks, while lower frozen blocks stay in eval.
+    if hasattr(model, "dna_frozen"):
+        model.dna_frozen = mode == "none"
+    if mode == "none":
+        dna_model.eval()
+
+    if mode == "none":
+        frozen_modules = [dna_model]
+    elif mode == "upper":
+        frozen_modules = [
+            *getattr(dna_model, "motif_stem", ()),
+            *(
+                module
+                for module in (
+                    getattr(dna_model, "stem_norm", None),
+                    getattr(dna_model, "stem_activation", None),
+                    getattr(dna_model, "stem_dropout", None),
+                    getattr(dna_model, "head", None),
+                )
+                if module is not None
+            ),
+            *list(getattr(dna_model, "context_blocks", ())[:-1]),
+            *list(getattr(dna_model, "attention_blocks", ())[:-1]),
+        ]
+    else:
+        frozen_modules = []
+    setattr(model, "_frozen_dna_modules", frozen_modules)
+
+    n_trainable = sum(
+        parameter.numel() for parameter in dna_model.parameters() if parameter.requires_grad
+    )
+    print(
+        "DNA fine-tuning:",
+        {
+            "mode": mode,
+            "trainable_dna_parameters": n_trainable,
+            "unfrozen_modules": [type(module).__name__ for module in unfrozen_modules],
+        },
+    )
+    return n_trainable
+
+
+def set_frozen_dna_modules_eval(model: torch.nn.Module) -> None:
+    """Keep dropout and batch norm fixed in lower frozen DNA layers."""
+    for module in getattr(model, "_frozen_dna_modules", ()):
+        module.eval()
+
+
+def build_optimizer(
+    model: torch.nn.Module,
+    args: argparse.Namespace,
+) -> torch.optim.Optimizer:
+    dna_model = getattr(model, "dna_model", None)
+    dna_parameters = (
+        [parameter for parameter in dna_model.parameters() if parameter.requires_grad]
+        if dna_model is not None
+        else []
+    )
+    dna_parameter_ids = {id(parameter) for parameter in dna_parameters}
+    other_parameters = [
+        parameter
+        for parameter in model.parameters()
+        if parameter.requires_grad and id(parameter) not in dna_parameter_ids
+    ]
+    if not other_parameters and not dna_parameters:
+        raise ValueError("Model has no trainable parameters")
+
+    parameter_groups: list[dict[str, object]] = []
+    if other_parameters:
+        parameter_groups.append({"params": other_parameters, "lr": args.lr})
+    if dna_parameters:
+        dna_lr = args.dna_finetune_lr if args.dna_finetune_mode != "none" else args.lr
+        parameter_groups.append({"params": dna_parameters, "lr": dna_lr})
+    print(
+        "Optimizer parameter groups:",
+        [
+            {
+                "lr": group["lr"],
+                "parameters": sum(parameter.numel() for parameter in group["params"]),
+            }
+            for group in parameter_groups
+        ],
+    )
+    return torch.optim.AdamW(parameter_groups, weight_decay=args.weight_decay)
+
+
 def save_checkpoint(
     path: Path,
     *,
@@ -1796,6 +2015,7 @@ def train_one_epoch(
     epoch: int,
 ) -> DenseEpochStats:
     model.train()
+    set_frozen_dna_modules_eval(model)
     total_loss = 0.0
     total_examples = 0
     tp = fp = fn = 0.0
@@ -2593,23 +2813,23 @@ def main() -> None:
         evaluation_checkpoint = load_checkpoint_cpu(args.output_dir / "best.pt")
         model.load_state_dict(evaluation_checkpoint["model_state_dict"])
         print(f"Loaded existing best checkpoint for evaluation: {args.output_dir / 'best.pt'}")
+    elif args.resume_checkpoint is not None:
+        load_resume_checkpoint(
+            model,
+            args.resume_checkpoint,
+            expected_model_name=args.model,
+            expected_tf_names=dataset.tf_names,
+        )
     elif args.pretrained_dna_checkpoint is not None:
         load_pretrained_dna_branch(model, args.pretrained_dna_checkpoint, device)
-    if args.freeze_dna_branch and not args.evaluate_only:
+    if args.resume_checkpoint is not None:
+        configure_dna_finetuning(model, args.dna_finetune_mode)
+    elif args.freeze_dna_branch and not args.evaluate_only:
         freeze_dna_branch(model)
         print("Frozen DNA branch.")
     print("Trainable parameters:", count_parameters(model))
 
-    trainable_parameters = [
-        parameter for parameter in model.parameters() if parameter.requires_grad
-    ]
-    if not trainable_parameters:
-        raise ValueError("Model has no trainable parameters")
-    optimizer = torch.optim.AdamW(
-        trainable_parameters,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
+    optimizer = build_optimizer(model, args)
     scheduler = build_lr_scheduler(args, optimizer)
     if args.no_pos_weight:
         pos_weight = None
