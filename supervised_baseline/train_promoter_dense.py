@@ -157,7 +157,7 @@ class DenseSplitStats:
 
 MULTITASK_LABEL_MODE = "tf_and_merged_train_tfs"
 LABEL_MODES = ("tf", "merged_train_tfs", MULTITASK_LABEL_MODE)
-LOSS_NAMES = ("bce", "focal", "rank")
+LOSS_NAMES = ("bce", "focal", "rank", "event_mil")
 TRAINING_WINDOW_MODES = ("full_promoter", "sampled_windows")
 FINAL_EVAL_SCOPES = ("all", "test_only", "val_only")
 DNA_FINETUNE_MODES = ("none", "upper", "all")
@@ -354,6 +354,39 @@ def parse_args() -> argparse.Namespace:
             "Number of highest-scoring bases used for the negative-only "
             "penalty in --loss rank."
         ),
+    )
+    parser.add_argument(
+        "--event-pool-radius-bp",
+        type=int,
+        default=10,
+        help=(
+            "Tolerance radius pooled around each strict site for --loss event_mil. "
+            "The loss needs one sharp peak somewhere in this region."
+        ),
+    )
+    parser.add_argument(
+        "--event-pool-temperature",
+        type=float,
+        default=0.5,
+        help=(
+            "Soft-max temperature for pooling scores inside an event region for "
+            "--loss event_mil. Smaller values are closer to max pooling."
+        ),
+    )
+    parser.add_argument(
+        "--event-negative-top-k",
+        type=int,
+        default=32,
+        help=(
+            "Number of highest-scoring background bases penalized per promoter-TF "
+            "pair for --loss event_mil."
+        ),
+    )
+    parser.add_argument(
+        "--event-negative-weight",
+        type=float,
+        default=1.0,
+        help="Weight of the hard-background penalty for --loss event_mil.",
     )
     parser.add_argument(
         "--window-loss-weight",
@@ -793,6 +826,16 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--rank-negative-weight must be non-negative")
     if args.rank_negative_top_k <= 0:
         raise ValueError("--rank-negative-top-k must be positive")
+    if args.event_pool_radius_bp < 0:
+        raise ValueError("--event-pool-radius-bp must be non-negative")
+    if args.event_pool_temperature <= 0:
+        raise ValueError("--event-pool-temperature must be positive")
+    if args.event_negative_top_k <= 0:
+        raise ValueError("--event-negative-top-k must be positive")
+    if args.event_negative_weight < 0:
+        raise ValueError("--event-negative-weight must be non-negative")
+    if args.loss == "event_mil" and args.label_mode != "tf":
+        raise ValueError("--loss event_mil requires --label-mode tf")
     if args.window_loss_weight < 0:
         raise ValueError("--window-loss-weight must be non-negative")
     if args.window_pooling_top_k <= 0:
@@ -835,10 +878,9 @@ def parse_args() -> argparse.Namespace:
             "--candidate-center-loss-weight requires "
             "--sampled-window-candidate-fraction > 0"
         )
-    if args.candidate_center_loss_weight > 0 and args.loss == "rank":
+    if args.candidate_center_loss_weight > 0 and args.loss not in {"bce", "focal"}:
         raise ValueError(
-            "--candidate-center-loss-weight is supported with BCE or focal loss, "
-            "not the position-ranking objective"
+            "--candidate-center-loss-weight is supported with BCE or focal loss only"
         )
     if args.sampled_window_margin_bp < 0:
         raise ValueError("--sampled-window-margin-bp must be non-negative")
@@ -1401,6 +1443,96 @@ def dense_position_rank_loss(
     return torch.stack(losses).sum()
 
 
+def dense_event_mil_loss(
+    logits: torch.Tensor,
+    hard_targets: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    pool_radius_bp: int,
+    pool_temperature: float,
+    negative_top_k: int,
+    negative_weight: float,
+) -> torch.Tensor:
+    """Learn one sharp peak per annotated event and suppress hard background peaks.
+
+    Each contiguous strict target interval is treated as a separate binding
+    event. Its positive score is a temperature-controlled log-mean-exp over
+    the interval expanded by ``pool_radius_bp``. This gives a base-wise model
+    credit for a single high peak near the annotation, rather than requiring a
+    whole dilated plateau to be positive. The top background logits outside all
+    event regions receive a negative BCE penalty.
+    """
+    if logits.shape != hard_targets.shape:
+        raise ValueError("Event MIL logits and targets must have matching shapes")
+    if mask.ndim != 2 or mask.shape[0] != logits.shape[0] or mask.shape[1] != logits.shape[2]:
+        raise ValueError("Event MIL mask must have shape [batch, length]")
+    if pool_radius_bp < 0:
+        raise ValueError("event pool radius must be non-negative")
+    if pool_temperature <= 0:
+        raise ValueError("event pool temperature must be positive")
+    if negative_top_k <= 0:
+        raise ValueError("event negative top-k must be positive")
+    if negative_weight < 0:
+        raise ValueError("event negative weight must be non-negative")
+
+    valid = mask.unsqueeze(1).expand_as(logits)
+    strict_targets = (hard_targets >= 0.5) & valid
+    event_regions = torch.zeros_like(strict_targets)
+    positive_losses: list[torch.Tensor] = []
+
+    # Site labels are sparse, so explicitly recovering their contiguous
+    # intervals is clearer and more reliable than treating dilated bases as
+    # independent positive examples.
+    for batch_idx in range(logits.shape[0]):
+        valid_positions = mask[batch_idx]
+        for tf_idx in range(logits.shape[1]):
+            positions = torch.nonzero(strict_targets[batch_idx, tf_idx], as_tuple=False).flatten()
+            if positions.numel() == 0:
+                continue
+            starts = torch.ones_like(positions, dtype=torch.bool)
+            starts[1:] = positions[1:] > positions[:-1] + 1
+            event_starts = positions[starts]
+            event_ends = torch.cat(
+                (
+                    positions[:-1][starts[1:]],
+                    positions[-1:].clone(),
+                )
+            )
+            for start, end in zip(event_starts.tolist(), event_ends.tolist()):
+                left = max(0, int(start) - pool_radius_bp)
+                right = min(logits.shape[-1], int(end) + pool_radius_bp + 1)
+                region_valid = valid_positions[left:right]
+                if not bool(region_valid.any()):
+                    continue
+                event_regions[batch_idx, tf_idx, left:right] |= region_valid
+                region_logits = logits[batch_idx, tf_idx, left:right][region_valid]
+                pooled_logit = pool_temperature * (
+                    torch.logsumexp(region_logits / pool_temperature, dim=0)
+                    - region_logits.new_tensor(float(region_logits.numel())).log()
+                )
+                positive_losses.append(F.softplus(-pooled_logit))
+
+    losses: list[torch.Tensor] = []
+    if positive_losses:
+        losses.append(torch.stack(positive_losses).mean())
+
+    if negative_weight > 0:
+        background = valid & ~event_regions
+        k = min(int(negative_top_k), int(logits.shape[-1]))
+        top_background = torch.topk(
+            logits.masked_fill(~background, -torch.inf),
+            k=k,
+            dim=-1,
+        ).values
+        finite = torch.isfinite(top_background)
+        if finite.any():
+            losses.append(negative_weight * F.softplus(top_background[finite]).mean())
+
+    if not losses:
+        return logits.sum() * 0.0
+    return torch.stack(losses).sum()
+
+
 def dense_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -1413,6 +1545,10 @@ def dense_loss(
     rank_temperature: float,
     rank_negative_weight: float,
     rank_negative_top_k: int,
+    event_pool_radius_bp: int,
+    event_pool_temperature: float,
+    event_negative_top_k: int,
+    event_negative_weight: float,
 ) -> torch.Tensor:
     if loss_name == "bce":
         return dense_bce_loss(logits, targets, mask, pos_weight)
@@ -1433,6 +1569,16 @@ def dense_loss(
             temperature=rank_temperature,
             negative_weight=rank_negative_weight,
             negative_top_k=rank_negative_top_k,
+        )
+    if loss_name == "event_mil":
+        return dense_event_mil_loss(
+            logits,
+            targets,
+            mask,
+            pool_radius_bp=event_pool_radius_bp,
+            pool_temperature=event_pool_temperature,
+            negative_top_k=event_negative_top_k,
+            negative_weight=event_negative_weight,
         )
     raise ValueError(f"Unknown loss: {loss_name}")
 
@@ -1577,6 +1723,10 @@ def model_config_from_args(
         "rank_temperature": args.rank_temperature,
         "rank_negative_weight": args.rank_negative_weight,
         "rank_negative_top_k": args.rank_negative_top_k,
+        "event_pool_radius_bp": args.event_pool_radius_bp,
+        "event_pool_temperature": args.event_pool_temperature,
+        "event_negative_top_k": args.event_negative_top_k,
+        "event_negative_weight": args.event_negative_weight,
         "window_loss_weight": args.window_loss_weight,
         "window_pooling": args.window_pooling,
         "window_pooling_top_k": args.window_pooling_top_k,
@@ -2019,6 +2169,10 @@ def train_one_epoch(
     rank_temperature: float,
     rank_negative_weight: float,
     rank_negative_top_k: int,
+    event_pool_radius_bp: int,
+    event_pool_temperature: float,
+    event_negative_top_k: int,
+    event_negative_weight: float,
     window_loss_weight: float,
     candidate_center_loss_weight: float,
     epoch: int,
@@ -2099,7 +2253,7 @@ def train_one_epoch(
             raise ValueError(
                 f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
             )
-        loss_targets = hard_y if loss_name == "rank" else y
+        loss_targets = hard_y if loss_name in {"rank", "event_mil"} else y
         localization_loss = dense_loss(
             logits,
             loss_targets,
@@ -2111,6 +2265,10 @@ def train_one_epoch(
             rank_temperature=rank_temperature,
             rank_negative_weight=rank_negative_weight,
             rank_negative_top_k=rank_negative_top_k,
+            event_pool_radius_bp=event_pool_radius_bp,
+            event_pool_temperature=event_pool_temperature,
+            event_negative_top_k=event_negative_top_k,
+            event_negative_weight=event_negative_weight,
         )
         loss = localization_loss
         candidate_loss_value = None
@@ -2236,6 +2394,10 @@ def evaluate_dense(
     rank_temperature: float,
     rank_negative_weight: float,
     rank_negative_top_k: int,
+    event_pool_radius_bp: int,
+    event_pool_temperature: float,
+    event_negative_top_k: int,
+    event_negative_weight: float,
     window_loss_weight: float,
     tf_names: list[str] | None = None,
     merged_label_name: str = "merged_train_tfs",
@@ -2356,7 +2518,7 @@ def evaluate_dense(
                 raise ValueError(
                     f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
                 )
-            loss_targets = hard_y if loss_name == "rank" else y
+            loss_targets = hard_y if loss_name in {"rank", "event_mil"} else y
             localization_loss = dense_loss(
                 logits,
                 loss_targets,
@@ -2368,6 +2530,10 @@ def evaluate_dense(
                 rank_temperature=rank_temperature,
                 rank_negative_weight=rank_negative_weight,
                 rank_negative_top_k=rank_negative_top_k,
+                event_pool_radius_bp=event_pool_radius_bp,
+                event_pool_temperature=event_pool_temperature,
+                event_negative_top_k=event_negative_top_k,
+                event_negative_weight=event_negative_weight,
             )
             loss = localization_loss
             window_targets = None
@@ -2840,8 +3006,10 @@ def main() -> None:
 
     optimizer = build_optimizer(model, args)
     scheduler = build_lr_scheduler(args, optimizer)
-    if args.no_pos_weight:
+    if args.no_pos_weight or args.loss == "event_mil":
         pos_weight = None
+        if args.loss == "event_mil" and not args.no_pos_weight:
+            print("Event MIL loss uses its own hard-background penalty; ignoring pos_weight.")
     elif args.label_mode == "merged_train_tfs":
         pos_weight = compute_merged_pos_weight(
             dataset,
@@ -2970,6 +3138,10 @@ def main() -> None:
             rank_temperature=args.rank_temperature,
             rank_negative_weight=args.rank_negative_weight,
             rank_negative_top_k=args.rank_negative_top_k,
+            event_pool_radius_bp=args.event_pool_radius_bp,
+            event_pool_temperature=args.event_pool_temperature,
+            event_negative_top_k=args.event_negative_top_k,
+            event_negative_weight=args.event_negative_weight,
             window_loss_weight=args.window_loss_weight,
             candidate_center_loss_weight=args.candidate_center_loss_weight,
             epoch=epoch,
@@ -2996,6 +3168,10 @@ def main() -> None:
                     rank_temperature=args.rank_temperature,
                     rank_negative_weight=args.rank_negative_weight,
                     rank_negative_top_k=args.rank_negative_top_k,
+                    event_pool_radius_bp=args.event_pool_radius_bp,
+                    event_pool_temperature=args.event_pool_temperature,
+                    event_negative_top_k=args.event_negative_top_k,
+                    event_negative_weight=args.event_negative_weight,
                     window_loss_weight=args.window_loss_weight,
                     tf_names=dataset.tf_names,
                     merged_label_name=validation_merged_label_name,
@@ -3314,6 +3490,10 @@ def main() -> None:
             rank_temperature=args.rank_temperature,
             rank_negative_weight=args.rank_negative_weight,
             rank_negative_top_k=args.rank_negative_top_k,
+            event_pool_radius_bp=args.event_pool_radius_bp,
+            event_pool_temperature=args.event_pool_temperature,
+            event_negative_top_k=args.event_negative_top_k,
+            event_negative_weight=args.event_negative_weight,
             window_loss_weight=args.window_loss_weight,
             tf_names=dataset.tf_names,
             merged_label_name=merged_label_name,

@@ -235,6 +235,10 @@ def evaluate_split(
     rank_temperature = float(saved_option(checkpoint, "rank_temperature", 1.0))
     rank_negative_weight = float(saved_option(checkpoint, "rank_negative_weight", 1.0))
     rank_negative_top_k = int(saved_option(checkpoint, "rank_negative_top_k", 10))
+    event_pool_radius_bp = int(saved_option(checkpoint, "event_pool_radius_bp", 10))
+    event_pool_temperature = float(saved_option(checkpoint, "event_pool_temperature", 0.5))
+    event_negative_top_k = int(saved_option(checkpoint, "event_negative_top_k", 32))
+    event_negative_weight = float(saved_option(checkpoint, "event_negative_weight", 1.0))
 
     with torch.no_grad():
         for batch in tqdm(loader, desc=f"Evaluating {name}"):
@@ -245,7 +249,7 @@ def evaluate_split(
             logits = split_output(forward_dense_model(model, x, tf_tensor))
             if logits.shape != hard_y.shape:
                 raise ValueError(f"{name} logit/label mismatch: {logits.shape} vs {hard_y.shape}")
-            loss_target = hard_y if loss_name == "rank" else dilated_y
+            loss_target = hard_y if loss_name in {"rank", "event_mil"} else dilated_y
             loss = dense_loss(
                 logits,
                 loss_target,
@@ -257,6 +261,10 @@ def evaluate_split(
                 rank_temperature=rank_temperature,
                 rank_negative_weight=rank_negative_weight,
                 rank_negative_top_k=rank_negative_top_k,
+                event_pool_radius_bp=event_pool_radius_bp,
+                event_pool_temperature=event_pool_temperature,
+                event_negative_top_k=event_negative_top_k,
+                event_negative_weight=event_negative_weight,
             )
             total_loss += float(loss.detach().cpu()) * x.shape[0]
             total_examples += x.shape[0]
