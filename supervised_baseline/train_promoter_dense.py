@@ -2965,7 +2965,11 @@ def main() -> None:
         eval_pos_weight = pos_weight
 
     if args.final_eval_scope == "test_only":
-        preferred_test_job_names = ("test_promoters_test_tfs", "test")
+        preferred_test_job_names = (
+            "test_promoters_test_tfs",
+            "test_promoters_train_tfs_plus_merged_train_tfs",
+            "test",
+        )
         final_jobs = {
             name: final_jobs[name]
             for name in preferred_test_job_names
