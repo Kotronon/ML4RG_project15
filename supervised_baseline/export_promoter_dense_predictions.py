@@ -795,7 +795,9 @@ def main() -> None:
         )
     model = build_dense_model(
         str(config["model_name"]),
-        n_tfs=len(feature_names),
+        # Recreate the checkpoint's complete TF-conditioned model first.  A
+        # requested export split only selects output columns during scoring.
+        n_tfs=len(all_feature_names),
         input_channels=input_channels,
         tf_embeddings=tf_embeddings,
         hidden_channels=int(config["hidden_channels"]),
