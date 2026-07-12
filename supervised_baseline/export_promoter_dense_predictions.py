@@ -27,7 +27,12 @@ try:
     )
     from .model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations, parse_int_tuple
     from .tf_embeddings import load_tf_embeddings
-    from .train_promoter_dense import collate_promoter_batch, prepare_x
+    from .tf_splits import load_tf_split, normalize_tf_split, tf_split_indices
+    from .train_promoter_dense import (
+        collate_promoter_batch,
+        forward_dense_model,
+        prepare_x,
+    )
 except ImportError:
     from dataset import (
         BindingBenchPromoterEmbeddingDataset,
@@ -44,7 +49,8 @@ except ImportError:
     )
     from model import DENSE_MODEL_NAMES, build_dense_model, parse_dilations, parse_int_tuple
     from tf_embeddings import load_tf_embeddings
-    from train_promoter_dense import collate_promoter_batch, prepare_x
+    from tf_splits import load_tf_split, normalize_tf_split, tf_split_indices
+    from train_promoter_dense import collate_promoter_batch, forward_dense_model, prepare_x
 
 
 DEFAULT_PROJECT = Path("/s/project/ml4rg_students/2026/project15")
@@ -149,6 +155,19 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--max-regions", type=int)
+    parser.add_argument(
+        "--tf-split-path",
+        type=Path,
+        help=(
+            "Optional training TF split JSON. When supplied with --tf-export-split, "
+            "export only that TF partition while still scoring every promoter."
+        ),
+    )
+    parser.add_argument(
+        "--tf-export-split",
+        choices=("train", "val", "test"),
+        help="TF partition to export from --tf-split-path.",
+    )
     return parser.parse_args()
 
 
@@ -513,11 +532,12 @@ def score_batch(
     device: torch.device,
     input_mode: str,
     score_mode: str,
+    tf_indices: torch.Tensor | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     x = prepare_x(batch["x"].to(device, non_blocking=True), input_mode)
     mask = batch["mask"].detach().cpu().numpy().astype(bool, copy=False)
     with torch.no_grad():
-        outputs = model(x)
+        outputs = forward_dense_model(model, x, tf_indices)
         logits = outputs["logits"] if isinstance(outputs, dict) else outputs
         scores = logits.sigmoid() if score_mode == "sigmoid" else logits
     scores_np = scores.detach().cpu().numpy().astype(np.float32, copy=False)
@@ -737,10 +757,26 @@ def main() -> None:
             "Dataset TF order does not match checkpoint TF order. "
             "Export with the same sites/min-sites settings used for training."
         )
-    feature_names = resolve_output_feature_names(
+    all_feature_names = resolve_output_feature_names(
         config=config,
         checkpoint_tf_names=tf_names,
     )
+    if args.tf_export_split is not None and args.tf_split_path is None:
+        raise ValueError("--tf-export-split requires --tf-split-path")
+    if args.tf_split_path is not None and args.tf_export_split is None:
+        raise ValueError("--tf-split-path requires --tf-export-split")
+
+    export_tf_indices: list[int] | None = None
+    if args.tf_split_path is not None:
+        tf_split = normalize_tf_split(load_tf_split(args.tf_split_path), tf_names)
+        export_tf_indices = tf_split_indices(tf_split, args.tf_export_split)
+        if not export_tf_indices:
+            raise ValueError(
+                f"TF split {args.tf_export_split!r} contains no checkpoint TFs"
+            )
+        feature_names = [all_feature_names[idx] for idx in export_tf_indices]
+    else:
+        feature_names = all_feature_names
 
     input_channels = int(
         checkpoint_model_config(checkpoint).get(
@@ -792,6 +828,11 @@ def main() -> None:
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+    export_tf_tensor = (
+        torch.tensor(export_tf_indices, dtype=torch.long, device=device)
+        if export_tf_indices is not None
+        else None
+    )
 
     candidate_k = (
         args.top_k_per_tf
@@ -825,6 +866,7 @@ def main() -> None:
         print(f"TF embeddings:        {config['tf_embeddings_path']}")
     print(f"Dataset TF labels:    {len(tf_names)}")
     print(f"Model output features:{len(feature_names)}")
+    print(f"TF export split:      {args.tf_export_split or '<all>'}")
     print(f"Promoters:            {len(dataset)}")
     print(f"Top K per TF:         {args.top_k_per_tf}")
     print(f"Pre-NMS candidates:   {candidate_k}")
@@ -842,6 +884,7 @@ def main() -> None:
             device=device,
             input_mode=str(config["input_mode"]),
             score_mode=args.score_mode,
+            tf_indices=export_tf_tensor,
         )
         n_scored_positions += update_topk_for_batch(
             topk=topk,
@@ -889,6 +932,9 @@ def main() -> None:
         "n_tfs": len(tf_names),
         "n_output_features": len(feature_names),
         "feature_names": feature_names,
+        "tf_split_path": str(args.tf_split_path) if args.tf_split_path else None,
+        "tf_export_split": args.tf_export_split,
+        "tf_export_indices": export_tf_indices,
         "model_config": {
             **config,
             "sites_path": str(config["sites_path"]),

@@ -58,6 +58,8 @@ EMBEDDING_KEY_COLUMN="${EMBEDDING_KEY_COLUMN:-}"
 SEQUENCE_ORIENTATION="${SEQUENCE_ORIENTATION:-}"
 INCLUDE_TERMINAL_ATG="${INCLUDE_TERMINAL_ATG:-false}"
 MAX_REGIONS="${MAX_REGIONS:-}"
+TF_SPLIT_PATH="${TF_SPLIT_PATH:-}"
+TF_EXPORT_SPLIT="${TF_EXPORT_SPLIT:-}"
 EXTRA_EXPORT_ARGS="${EXTRA_EXPORT_ARGS:-}"
 
 mkdir -p "${INPUT_DIR}" "${RUN_DIR}" "${REPO_DIR}/slurm/logs"
@@ -92,6 +94,7 @@ echo "Peak caller:          ${PEAK_CALLER}"
 echo "Pre-NMS factor:       ${PRE_NMS_FACTOR}"
 echo "Score mode:           ${SCORE_MODE}"
 echo "Feature rank method:  ${FEATURE_RANK_METHOD}"
+echo "TF export split:      ${TF_EXPORT_SPLIT:-<all>}"
 echo "Feature name filter:  ${FEATURE_NAME_FILTER_PATH:-<none>}"
 echo "Target name filter:   ${TARGET_NAME_FILTER_PATH:-<none>}"
 echo "Device:               ${DEVICE}"
@@ -120,6 +123,12 @@ if [[ "${INCLUDE_TERMINAL_ATG}" == "true" ]]; then
 fi
 if [[ -n "${MAX_REGIONS}" ]]; then
     OPTIONAL_ARGS+=(--max-regions "${MAX_REGIONS}")
+fi
+if [[ -n "${TF_SPLIT_PATH}" ]]; then
+    OPTIONAL_ARGS+=(--tf-split-path "${TF_SPLIT_PATH}")
+fi
+if [[ -n "${TF_EXPORT_SPLIT}" ]]; then
+    OPTIONAL_ARGS+=(--tf-export-split "${TF_EXPORT_SPLIT}")
 fi
 
 BINDING_BENCH_FILTER_ARGS=()
