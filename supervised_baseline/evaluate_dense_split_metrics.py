@@ -74,7 +74,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tf-embedding-column")
     parser.add_argument("--tf-name-map", type=Path)
     parser.add_argument("--max-regions", type=int)
-    parser.add_argument("--promoter-split-path", type=Path, required=True)
+    parser.add_argument("--promoter-split-path", type=Path)
+    parser.add_argument(
+        "--all-promoters",
+        action="store_true",
+        help=(
+            "Evaluate every promoter against one TF partition. Use this for "
+            "TF-holdout experiments trained with --promoter-split-mode none."
+        ),
+    )
+    parser.add_argument(
+        "--tf-eval-split",
+        choices=("train", "val", "test"),
+        default="test",
+        help="TF partition evaluated with --all-promoters (default: test).",
+    )
     parser.add_argument("--tf-split-path", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -392,6 +406,13 @@ def main() -> None:
     args = parse_args()
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
+    if args.all_promoters and args.promoter_split_path is not None:
+        raise ValueError("--all-promoters cannot be combined with --promoter-split-path")
+    if not args.all_promoters and args.promoter_split_path is None:
+        raise ValueError(
+            "Pass --promoter-split-path for paired split evaluation, or use "
+            "--all-promoters for a TF-holdout-only evaluation."
+        )
     device = get_device(args.device)
     checkpoint = load_checkpoint(args.checkpoint, device)
     checkpoint_tf_names = checkpoint.get("tf_names")
@@ -406,11 +427,32 @@ def main() -> None:
     )
     if dataset.tf_names != tf_names:
         raise ValueError("Dataset TF order does not match checkpoint TF order")
-    promoter_split = normalize_promoter_split(
-        load_promoter_split(args.promoter_split_path), dataset.records
-    )
     tf_split = normalize_tf_split(load_tf_split(args.tf_split_path), dataset.tf_names)
     model = build_model(checkpoint, config, dataset, tf_names, device)
+
+    if args.all_promoters:
+        evaluation_pairs = (
+            (
+                f"all_promoters_{args.tf_eval_split}_tfs",
+                list(range(len(dataset))),
+                args.tf_eval_split,
+            ),
+        )
+        promoter_split_counts: dict[str, int] = {
+            "all": len(dataset),
+            "train": len(dataset),
+            "val": 0,
+            "test": 0,
+        }
+    else:
+        promoter_split = normalize_promoter_split(
+            load_promoter_split(args.promoter_split_path), dataset.records
+        )
+        evaluation_pairs = tuple(
+            (name, split_indices(promoter_split, promoter_name), tf_name)
+            for name, promoter_name, tf_name in SPLIT_PAIRS
+        )
+        promoter_split_counts = dict(promoter_split["counts"])
 
     results: dict[str, object] = {
         "checkpoint": str(args.checkpoint),
@@ -418,17 +460,17 @@ def main() -> None:
             "basewise_ranking": "streaming fixed-logit histogram approximation",
             "threshold": "logit >= 0.0 (probability >= 0.5)",
             "promoter_pair": "exact max-logit-over-promoter ranking",
-            "split_pairs": list(SPLIT_PAIRS),
+            "split_pairs": [name for name, _, _ in evaluation_pairs],
         },
-        "promoter_split_counts": promoter_split["counts"],
+        "promoter_split_counts": promoter_split_counts,
         "tf_split_counts": tf_split["counts"],
     }
-    for name, promoter_name, tf_name in SPLIT_PAIRS:
+    for name, promoter_indices, tf_name in evaluation_pairs:
         results[name] = evaluate_split(
             name=name,
             model=model,
             dataset=dataset,
-            promoter_indices=split_indices(promoter_split, promoter_name),
+            promoter_indices=promoter_indices,
             tf_indices=tf_split_indices(tf_split, tf_name),
             input_mode=str(config["input_mode"]),
             batch_size=args.batch_size,
