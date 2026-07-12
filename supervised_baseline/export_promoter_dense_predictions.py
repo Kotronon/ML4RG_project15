@@ -55,6 +55,7 @@ PROTEIN_DENSE_MODEL_NAMES = (
     "dense_protein_motif_cnn",
     "dense_protein_residual_bilinear_cnn",
     "dense_protein_direct_scorer_cnn",
+    "dense_protein_film_motif_cnn",
     "dense_protein_window_localization_cnn",
     "dense_protein_res_dilated_crossattention",
     "dense_transbind_cnn_lstm_attention",
@@ -401,6 +402,28 @@ def resolve_export_config(
         "min_sites_per_tf": min_sites_per_tf,
         "sequence_orientation": sequence_orientation,
         "trim_terminal_atg": trim_terminal_atg,
+        "label_smoothing_mode": str(
+            saved_config.get(
+                "label_smoothing_mode",
+                saved_args.get("label_smoothing_mode", "hard"),
+            )
+        ),
+        "label_smoothing_radius_bp": int(
+            saved_config.get(
+                "label_smoothing_radius_bp",
+                saved_args.get("label_smoothing_radius_bp", 0),
+            )
+        ),
+        "label_smoothing_sigma_bp": saved_config.get(
+            "label_smoothing_sigma_bp",
+            saved_args.get("label_smoothing_sigma_bp"),
+        ),
+        "film_eval_tf_chunk_size": int(
+            saved_config.get(
+                "film_eval_tf_chunk_size",
+                saved_args.get("film_eval_tf_chunk_size", 1),
+            )
+        ),
     }
 
 
@@ -417,6 +440,9 @@ def build_dataset(
         "tf_name_filter": tf_name_filter,
         "max_regions": max_regions,
         "trim_terminal_atg": bool(config["trim_terminal_atg"]),
+        "label_smoothing_mode": str(config["label_smoothing_mode"]),
+        "label_smoothing_radius_bp": int(config["label_smoothing_radius_bp"]),
+        "label_smoothing_sigma_bp": config["label_smoothing_sigma_bp"],
     }
     if config["input_mode"] == "raw":
         return BindingBenchPromoterSequenceDataset(**common)
@@ -760,6 +786,7 @@ def main() -> None:
         scorer_pair_dim=int(config["scorer_pair_dim"]),
         scorer_hidden_dim=int(config["scorer_hidden_dim"]),
         scorer_bias_mode=str(config["scorer_bias_mode"]),
+        film_eval_tf_chunk_size=int(config["film_eval_tf_chunk_size"]),
         window_pooling=str(config["window_pooling"]),
         window_pooling_top_k=int(config["window_pooling_top_k"]),
     ).to(device)

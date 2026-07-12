@@ -59,6 +59,10 @@ FOCAL_ALPHA="${FOCAL_ALPHA:-}"
 RANK_TEMPERATURE="${RANK_TEMPERATURE:-1.0}"
 RANK_NEGATIVE_WEIGHT="${RANK_NEGATIVE_WEIGHT:-0.1}"
 RANK_NEGATIVE_TOP_K="${RANK_NEGATIVE_TOP_K:-10}"
+EVENT_POOL_RADIUS_BP="${EVENT_POOL_RADIUS_BP:-10}"
+EVENT_POOL_TEMPERATURE="${EVENT_POOL_TEMPERATURE:-0.5}"
+EVENT_NEGATIVE_TOP_K="${EVENT_NEGATIVE_TOP_K:-32}"
+EVENT_NEGATIVE_WEIGHT="${EVENT_NEGATIVE_WEIGHT:-1.0}"
 WINDOW_LOSS_WEIGHT="${WINDOW_LOSS_WEIGHT:-1.0}"
 WINDOW_POOLING="${WINDOW_POOLING:-topk_logmeanexp}"
 WINDOW_POOLING_TOP_K="${WINDOW_POOLING_TOP_K:-10}"
@@ -174,6 +178,10 @@ echo "Focal alpha:          ${FOCAL_ALPHA:-<none>}"
 echo "Rank temperature:     ${RANK_TEMPERATURE}"
 echo "Rank neg weight:      ${RANK_NEGATIVE_WEIGHT}"
 echo "Rank neg top-k:       ${RANK_NEGATIVE_TOP_K}"
+echo "Event pool radius:    ${EVENT_POOL_RADIUS_BP}"
+echo "Event pool temp:      ${EVENT_POOL_TEMPERATURE}"
+echo "Event neg top-k:      ${EVENT_NEGATIVE_TOP_K}"
+echo "Event neg weight:     ${EVENT_NEGATIVE_WEIGHT}"
 echo "Window loss weight:   ${WINDOW_LOSS_WEIGHT}"
 echo "Window pooling:       ${WINDOW_POOLING}"
 echo "Window pooling top-k: ${WINDOW_POOLING_TOP_K}"
@@ -330,6 +338,10 @@ fi
     --rank-temperature "${RANK_TEMPERATURE}" \
     --rank-negative-weight "${RANK_NEGATIVE_WEIGHT}" \
     --rank-negative-top-k "${RANK_NEGATIVE_TOP_K}" \
+    --event-pool-radius-bp "${EVENT_POOL_RADIUS_BP}" \
+    --event-pool-temperature "${EVENT_POOL_TEMPERATURE}" \
+    --event-negative-top-k "${EVENT_NEGATIVE_TOP_K}" \
+    --event-negative-weight "${EVENT_NEGATIVE_WEIGHT}" \
     --window-loss-weight "${WINDOW_LOSS_WEIGHT}" \
     --window-pooling "${WINDOW_POOLING}" \
     --window-pooling-top-k "${WINDOW_POOLING_TOP_K}" \

@@ -150,13 +150,17 @@ class DenseSplitStats:
     window_predicted_positive_rate: float | None = None
     window_average_precision: float | None = None
     window_roc_auc: float | None = None
+    promoter_pair_average_precision: float | None = None
+    promoter_pair_roc_auc: float | None = None
+    promoter_pair_per_tf: list[dict[str, object]] | None = None
 
 
 MULTITASK_LABEL_MODE = "tf_and_merged_train_tfs"
 LABEL_MODES = ("tf", "merged_train_tfs", MULTITASK_LABEL_MODE)
-LOSS_NAMES = ("bce", "focal", "rank")
+LOSS_NAMES = ("bce", "focal", "rank", "event_mil")
 TRAINING_WINDOW_MODES = ("full_promoter", "sampled_windows")
-FINAL_EVAL_SCOPES = ("all", "test_only")
+FINAL_EVAL_SCOPES = ("all", "test_only", "val_only")
+DNA_FINETUNE_MODES = ("none", "upper", "all")
 
 
 def parse_args() -> argparse.Namespace:
@@ -352,6 +356,39 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--event-pool-radius-bp",
+        type=int,
+        default=10,
+        help=(
+            "Tolerance radius pooled around each strict site for --loss event_mil. "
+            "The loss needs one sharp peak somewhere in this region."
+        ),
+    )
+    parser.add_argument(
+        "--event-pool-temperature",
+        type=float,
+        default=0.5,
+        help=(
+            "Soft-max temperature for pooling scores inside an event region for "
+            "--loss event_mil. Smaller values are closer to max pooling."
+        ),
+    )
+    parser.add_argument(
+        "--event-negative-top-k",
+        type=int,
+        default=32,
+        help=(
+            "Number of highest-scoring background bases penalized per promoter-TF "
+            "pair for --loss event_mil."
+        ),
+    )
+    parser.add_argument(
+        "--event-negative-weight",
+        type=float,
+        default=1.0,
+        help="Weight of the hard-background penalty for --loss event_mil.",
+    )
+    parser.add_argument(
         "--window-loss-weight",
         type=float,
         default=1.0,
@@ -530,11 +567,38 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        help=(
+            "Load a complete model checkpoint and continue training from its "
+            "weights with a freshly initialized optimizer. This is intended for "
+            "second-stage fine-tuning of a protein-conditioned model."
+        ),
+    )
+    parser.add_argument(
         "--freeze-dna-branch",
         action="store_true",
         help=(
             "Freeze the initialized DNA branch and keep it in eval mode during "
             "training. Intended for the first residual protein-conditioning run."
+        ),
+    )
+    parser.add_argument(
+        "--dna-finetune-mode",
+        choices=DNA_FINETUNE_MODES,
+        default="none",
+        help=(
+            "DNA parameters to unfreeze after --resume-checkpoint. 'upper' "
+            "unfreezes the final dilated context block and final local-attention "
+            "block; 'all' unfreezes the full DNA encoder."
+        ),
+    )
+    parser.add_argument(
+        "--dna-finetune-lr",
+        type=float,
+        help=(
+            "Learning rate for DNA parameters selected by --dna-finetune-mode. "
+            "The remaining trainable parameters use --lr."
         ),
     )
     parser.add_argument(
@@ -707,9 +771,18 @@ def parse_args() -> argparse.Namespace:
         choices=FINAL_EVAL_SCOPES,
         default="all",
         help=(
-            "Final metric slices to compute. 'test_only' evaluates only "
-            "test promoters against held-out test TFs (or the ordinary test "
-            "split), avoiding very large all-pair train evaluations."
+            "Final metric slices to compute. 'test_only' evaluates only test "
+            "promoters against held-out test TFs; 'val_only' evaluates only "
+            "validation promoters against held-out validation TFs. Both avoid "
+            "very large all-pair train evaluations."
+        ),
+    )
+    parser.add_argument(
+        "--final-metrics-out",
+        type=Path,
+        help=(
+            "Optional path for final_metrics JSON. Useful with --evaluate-only "
+            "to preserve an existing run's original final_metrics.json."
         ),
     )
     parser.add_argument(
@@ -753,6 +826,16 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--rank-negative-weight must be non-negative")
     if args.rank_negative_top_k <= 0:
         raise ValueError("--rank-negative-top-k must be positive")
+    if args.event_pool_radius_bp < 0:
+        raise ValueError("--event-pool-radius-bp must be non-negative")
+    if args.event_pool_temperature <= 0:
+        raise ValueError("--event-pool-temperature must be positive")
+    if args.event_negative_top_k <= 0:
+        raise ValueError("--event-negative-top-k must be positive")
+    if args.event_negative_weight < 0:
+        raise ValueError("--event-negative-weight must be non-negative")
+    if args.loss == "event_mil" and args.label_mode != "tf":
+        raise ValueError("--loss event_mil requires --label-mode tf")
     if args.window_loss_weight < 0:
         raise ValueError("--window-loss-weight must be non-negative")
     if args.window_pooling_top_k <= 0:
@@ -795,10 +878,9 @@ def parse_args() -> argparse.Namespace:
             "--candidate-center-loss-weight requires "
             "--sampled-window-candidate-fraction > 0"
         )
-    if args.candidate_center_loss_weight > 0 and args.loss == "rank":
+    if args.candidate_center_loss_weight > 0 and args.loss not in {"bce", "focal"}:
         raise ValueError(
-            "--candidate-center-loss-weight is supported with BCE or focal loss, "
-            "not the position-ranking objective"
+            "--candidate-center-loss-weight is supported with BCE or focal loss only"
         )
     if args.sampled_window_margin_bp < 0:
         raise ValueError("--sampled-window-margin-bp must be non-negative")
@@ -812,6 +894,33 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--label-mode merged_train_tfs is intended for DNA-only models")
     if args.freeze_dna_branch and args.pretrained_dna_checkpoint is None:
         raise ValueError("--freeze-dna-branch requires --pretrained-dna-checkpoint")
+    if args.resume_checkpoint is not None:
+        if not args.resume_checkpoint.is_file():
+            raise ValueError(
+                f"--resume-checkpoint does not exist: {args.resume_checkpoint}"
+            )
+        if args.pretrained_dna_checkpoint is not None:
+            raise ValueError(
+                "--resume-checkpoint and --pretrained-dna-checkpoint are mutually exclusive"
+            )
+        if args.freeze_dna_branch:
+            raise ValueError(
+                "--resume-checkpoint cannot be combined with --freeze-dna-branch; "
+                "use --dna-finetune-mode instead"
+            )
+        if args.evaluate_only:
+            raise ValueError(
+                "--resume-checkpoint cannot be combined with --evaluate-only"
+            )
+    elif args.dna_finetune_mode != "none":
+        raise ValueError("--dna-finetune-mode requires --resume-checkpoint")
+    if args.dna_finetune_mode != "none":
+        if args.dna_finetune_lr is None or args.dna_finetune_lr <= 0:
+            raise ValueError(
+                "--dna-finetune-lr must be positive when --dna-finetune-mode is enabled"
+            )
+    elif args.dna_finetune_lr is not None:
+        raise ValueError("--dna-finetune-lr requires --dna-finetune-mode")
     if not 0.0 <= args.tf_embedding_dropout < 1.0:
         raise ValueError("--tf-embedding-dropout must be in [0, 1)")
     if args.dna_attention_window_bp < 0:
@@ -1334,6 +1443,96 @@ def dense_position_rank_loss(
     return torch.stack(losses).sum()
 
 
+def dense_event_mil_loss(
+    logits: torch.Tensor,
+    hard_targets: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    pool_radius_bp: int,
+    pool_temperature: float,
+    negative_top_k: int,
+    negative_weight: float,
+) -> torch.Tensor:
+    """Learn one sharp peak per annotated event and suppress hard background peaks.
+
+    Each contiguous strict target interval is treated as a separate binding
+    event. Its positive score is a temperature-controlled log-mean-exp over
+    the interval expanded by ``pool_radius_bp``. This gives a base-wise model
+    credit for a single high peak near the annotation, rather than requiring a
+    whole dilated plateau to be positive. The top background logits outside all
+    event regions receive a negative BCE penalty.
+    """
+    if logits.shape != hard_targets.shape:
+        raise ValueError("Event MIL logits and targets must have matching shapes")
+    if mask.ndim != 2 or mask.shape[0] != logits.shape[0] or mask.shape[1] != logits.shape[2]:
+        raise ValueError("Event MIL mask must have shape [batch, length]")
+    if pool_radius_bp < 0:
+        raise ValueError("event pool radius must be non-negative")
+    if pool_temperature <= 0:
+        raise ValueError("event pool temperature must be positive")
+    if negative_top_k <= 0:
+        raise ValueError("event negative top-k must be positive")
+    if negative_weight < 0:
+        raise ValueError("event negative weight must be non-negative")
+
+    valid = mask.unsqueeze(1).expand_as(logits)
+    strict_targets = (hard_targets >= 0.5) & valid
+    event_regions = torch.zeros_like(strict_targets)
+    positive_losses: list[torch.Tensor] = []
+
+    # Site labels are sparse, so explicitly recovering their contiguous
+    # intervals is clearer and more reliable than treating dilated bases as
+    # independent positive examples.
+    for batch_idx in range(logits.shape[0]):
+        valid_positions = mask[batch_idx]
+        for tf_idx in range(logits.shape[1]):
+            positions = torch.nonzero(strict_targets[batch_idx, tf_idx], as_tuple=False).flatten()
+            if positions.numel() == 0:
+                continue
+            starts = torch.ones_like(positions, dtype=torch.bool)
+            starts[1:] = positions[1:] > positions[:-1] + 1
+            event_starts = positions[starts]
+            event_ends = torch.cat(
+                (
+                    positions[:-1][starts[1:]],
+                    positions[-1:].clone(),
+                )
+            )
+            for start, end in zip(event_starts.tolist(), event_ends.tolist()):
+                left = max(0, int(start) - pool_radius_bp)
+                right = min(logits.shape[-1], int(end) + pool_radius_bp + 1)
+                region_valid = valid_positions[left:right]
+                if not bool(region_valid.any()):
+                    continue
+                event_regions[batch_idx, tf_idx, left:right] |= region_valid
+                region_logits = logits[batch_idx, tf_idx, left:right][region_valid]
+                pooled_logit = pool_temperature * (
+                    torch.logsumexp(region_logits / pool_temperature, dim=0)
+                    - region_logits.new_tensor(float(region_logits.numel())).log()
+                )
+                positive_losses.append(F.softplus(-pooled_logit))
+
+    losses: list[torch.Tensor] = []
+    if positive_losses:
+        losses.append(torch.stack(positive_losses).mean())
+
+    if negative_weight > 0:
+        background = valid & ~event_regions
+        k = min(int(negative_top_k), int(logits.shape[-1]))
+        top_background = torch.topk(
+            logits.masked_fill(~background, -torch.inf),
+            k=k,
+            dim=-1,
+        ).values
+        finite = torch.isfinite(top_background)
+        if finite.any():
+            losses.append(negative_weight * F.softplus(top_background[finite]).mean())
+
+    if not losses:
+        return logits.sum() * 0.0
+    return torch.stack(losses).sum()
+
+
 def dense_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -1346,6 +1545,10 @@ def dense_loss(
     rank_temperature: float,
     rank_negative_weight: float,
     rank_negative_top_k: int,
+    event_pool_radius_bp: int,
+    event_pool_temperature: float,
+    event_negative_top_k: int,
+    event_negative_weight: float,
 ) -> torch.Tensor:
     if loss_name == "bce":
         return dense_bce_loss(logits, targets, mask, pos_weight)
@@ -1366,6 +1569,16 @@ def dense_loss(
             temperature=rank_temperature,
             negative_weight=rank_negative_weight,
             negative_top_k=rank_negative_top_k,
+        )
+    if loss_name == "event_mil":
+        return dense_event_mil_loss(
+            logits,
+            targets,
+            mask,
+            pool_radius_bp=event_pool_radius_bp,
+            pool_temperature=event_pool_temperature,
+            negative_top_k=event_negative_top_k,
+            negative_weight=event_negative_weight,
         )
     raise ValueError(f"Unknown loss: {loss_name}")
 
@@ -1510,6 +1723,10 @@ def model_config_from_args(
         "rank_temperature": args.rank_temperature,
         "rank_negative_weight": args.rank_negative_weight,
         "rank_negative_top_k": args.rank_negative_top_k,
+        "event_pool_radius_bp": args.event_pool_radius_bp,
+        "event_pool_temperature": args.event_pool_temperature,
+        "event_negative_top_k": args.event_negative_top_k,
+        "event_negative_weight": args.event_negative_weight,
         "window_loss_weight": args.window_loss_weight,
         "window_pooling": args.window_pooling,
         "window_pooling_top_k": args.window_pooling_top_k,
@@ -1556,7 +1773,12 @@ def model_config_from_args(
             if args.pretrained_dna_checkpoint
             else None
         ),
+        "resume_checkpoint": (
+            str(args.resume_checkpoint) if args.resume_checkpoint else None
+        ),
         "freeze_dna_branch": args.freeze_dna_branch,
+        "dna_finetune_mode": args.dna_finetune_mode,
+        "dna_finetune_lr": args.dna_finetune_lr,
         "shuffle_tf_embeddings": args.shuffle_tf_embeddings,
         "scorer": args.scorer,
         "scorer_heads": args.scorer_heads,
@@ -1736,6 +1958,165 @@ def freeze_dna_branch(model: torch.nn.Module) -> None:
     freeze_method()
 
 
+def load_resume_checkpoint(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    *,
+    expected_model_name: str,
+    expected_tf_names: list[str],
+) -> dict[str, object]:
+    """Restore a complete model state while keeping a fresh optimizer."""
+    checkpoint = load_checkpoint_cpu(checkpoint_path)
+    config = _checkpoint_dict(checkpoint, "model_config")
+    saved_args = _checkpoint_dict(checkpoint, "args")
+    checkpoint_model = str(
+        checkpoint.get("model_name")
+        or config.get("model_name")
+        or saved_args.get("model", "")
+    )
+    if checkpoint_model != expected_model_name:
+        raise ValueError(
+            "Resume checkpoint model does not match this run: "
+            f"checkpoint has {checkpoint_model!r}, requested {expected_model_name!r}"
+        )
+
+    checkpoint_tf_names = checkpoint.get("tf_names")
+    if checkpoint_tf_names is not None and list(checkpoint_tf_names) != expected_tf_names:
+        raise ValueError(
+            "Resume checkpoint TF order does not match the current dataset. "
+            "Use the identical sites file, TF embedding table, and TF filtering options."
+        )
+
+    state = checkpoint.get("model_state_dict")
+    if not isinstance(state, dict):
+        raise ValueError(f"Resume checkpoint has no model_state_dict: {checkpoint_path}")
+    model.load_state_dict(state, strict=True)
+    print(
+        "Resumed complete model checkpoint with a fresh optimizer:",
+        {"checkpoint": str(checkpoint_path), "epoch": checkpoint.get("epoch")},
+    )
+    return checkpoint
+
+
+def configure_dna_finetuning(
+    model: torch.nn.Module,
+    mode: str,
+) -> int:
+    """Freeze a resumed DNA branch except for the requested upper layers."""
+    dna_model = getattr(model, "dna_model", None)
+    if dna_model is None:
+        raise ValueError(f"Model {type(model).__name__} has no DNA branch to fine-tune")
+    if mode not in DNA_FINETUNE_MODES:
+        raise ValueError(f"Unknown DNA fine-tune mode: {mode!r}")
+
+    for parameter in dna_model.parameters():
+        parameter.requires_grad = False
+
+    unfrozen_modules: list[torch.nn.Module] = []
+    if mode == "upper":
+        context_blocks = getattr(dna_model, "context_blocks", ())
+        attention_blocks = getattr(dna_model, "attention_blocks", ())
+        if context_blocks:
+            unfrozen_modules.append(context_blocks[-1])
+        if attention_blocks:
+            unfrozen_modules.append(attention_blocks[-1])
+        if not unfrozen_modules:
+            raise ValueError("DNA encoder has no upper context blocks to fine-tune")
+    elif mode == "all":
+        unfrozen_modules.append(dna_model)
+
+    for module in unfrozen_modules:
+        for parameter in module.parameters():
+            parameter.requires_grad = True
+
+    # DenseProteinDirectScorerCNN keeps the entire DNA branch in eval mode only
+    # for first-stage frozen runs. Partial fine-tuning needs model.train() to
+    # reach the selected upper blocks, while lower frozen blocks stay in eval.
+    if hasattr(model, "dna_frozen"):
+        model.dna_frozen = mode == "none"
+    if mode == "none":
+        dna_model.eval()
+
+    if mode == "none":
+        frozen_modules = [dna_model]
+    elif mode == "upper":
+        frozen_modules = [
+            *getattr(dna_model, "motif_stem", ()),
+            *(
+                module
+                for module in (
+                    getattr(dna_model, "stem_norm", None),
+                    getattr(dna_model, "stem_activation", None),
+                    getattr(dna_model, "stem_dropout", None),
+                    getattr(dna_model, "head", None),
+                )
+                if module is not None
+            ),
+            *list(getattr(dna_model, "context_blocks", ())[:-1]),
+            *list(getattr(dna_model, "attention_blocks", ())[:-1]),
+        ]
+    else:
+        frozen_modules = []
+    setattr(model, "_frozen_dna_modules", frozen_modules)
+
+    n_trainable = sum(
+        parameter.numel() for parameter in dna_model.parameters() if parameter.requires_grad
+    )
+    print(
+        "DNA fine-tuning:",
+        {
+            "mode": mode,
+            "trainable_dna_parameters": n_trainable,
+            "unfrozen_modules": [type(module).__name__ for module in unfrozen_modules],
+        },
+    )
+    return n_trainable
+
+
+def set_frozen_dna_modules_eval(model: torch.nn.Module) -> None:
+    """Keep dropout and batch norm fixed in lower frozen DNA layers."""
+    for module in getattr(model, "_frozen_dna_modules", ()):
+        module.eval()
+
+
+def build_optimizer(
+    model: torch.nn.Module,
+    args: argparse.Namespace,
+) -> torch.optim.Optimizer:
+    dna_model = getattr(model, "dna_model", None)
+    dna_parameters = (
+        [parameter for parameter in dna_model.parameters() if parameter.requires_grad]
+        if dna_model is not None
+        else []
+    )
+    dna_parameter_ids = {id(parameter) for parameter in dna_parameters}
+    other_parameters = [
+        parameter
+        for parameter in model.parameters()
+        if parameter.requires_grad and id(parameter) not in dna_parameter_ids
+    ]
+    if not other_parameters and not dna_parameters:
+        raise ValueError("Model has no trainable parameters")
+
+    parameter_groups: list[dict[str, object]] = []
+    if other_parameters:
+        parameter_groups.append({"params": other_parameters, "lr": args.lr})
+    if dna_parameters:
+        dna_lr = args.dna_finetune_lr if args.dna_finetune_mode != "none" else args.lr
+        parameter_groups.append({"params": dna_parameters, "lr": dna_lr})
+    print(
+        "Optimizer parameter groups:",
+        [
+            {
+                "lr": group["lr"],
+                "parameters": sum(parameter.numel() for parameter in group["params"]),
+            }
+            for group in parameter_groups
+        ],
+    )
+    return torch.optim.AdamW(parameter_groups, weight_decay=args.weight_decay)
+
+
 def save_checkpoint(
     path: Path,
     *,
@@ -1788,11 +2169,16 @@ def train_one_epoch(
     rank_temperature: float,
     rank_negative_weight: float,
     rank_negative_top_k: int,
+    event_pool_radius_bp: int,
+    event_pool_temperature: float,
+    event_negative_top_k: int,
+    event_negative_weight: float,
     window_loss_weight: float,
     candidate_center_loss_weight: float,
     epoch: int,
 ) -> DenseEpochStats:
     model.train()
+    set_frozen_dna_modules_eval(model)
     total_loss = 0.0
     total_examples = 0
     tp = fp = fn = 0.0
@@ -1867,7 +2253,7 @@ def train_one_epoch(
             raise ValueError(
                 f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
             )
-        loss_targets = hard_y if loss_name == "rank" else y
+        loss_targets = hard_y if loss_name in {"rank", "event_mil"} else y
         localization_loss = dense_loss(
             logits,
             loss_targets,
@@ -1879,6 +2265,10 @@ def train_one_epoch(
             rank_temperature=rank_temperature,
             rank_negative_weight=rank_negative_weight,
             rank_negative_top_k=rank_negative_top_k,
+            event_pool_radius_bp=event_pool_radius_bp,
+            event_pool_temperature=event_pool_temperature,
+            event_negative_top_k=event_negative_top_k,
+            event_negative_weight=event_negative_weight,
         )
         loss = localization_loss
         candidate_loss_value = None
@@ -2004,6 +2394,10 @@ def evaluate_dense(
     rank_temperature: float,
     rank_negative_weight: float,
     rank_negative_top_k: int,
+    event_pool_radius_bp: int,
+    event_pool_temperature: float,
+    event_negative_top_k: int,
+    event_negative_weight: float,
     window_loss_weight: float,
     tf_names: list[str] | None = None,
     merged_label_name: str = "merged_train_tfs",
@@ -2025,9 +2419,13 @@ def evaluate_dense(
     dilated_target_chunks: list[np.ndarray] = []
     window_score_chunks: list[np.ndarray] = []
     window_target_chunks: list[np.ndarray] = []
+    promoter_pair_score_chunks: list[np.ndarray] = []
+    promoter_pair_target_chunks: list[np.ndarray] = []
     per_tf_score_chunks: list[list[np.ndarray]] | None = None
     per_tf_target_chunks: list[list[np.ndarray]] | None = None
     per_tf_dilated_target_chunks: list[list[np.ndarray]] | None = None
+    per_tf_promoter_pair_score_chunks: list[list[np.ndarray]] | None = None
+    per_tf_promoter_pair_target_chunks: list[list[np.ndarray]] | None = None
     selected_tf_names: list[str] | None = None
 
     if tf_names is not None:
@@ -2052,6 +2450,8 @@ def evaluate_dense(
         per_tf_score_chunks = [[] for _ in selected_tf_names]
         per_tf_target_chunks = [[] for _ in selected_tf_names]
         per_tf_dilated_target_chunks = [[] for _ in selected_tf_names]
+        per_tf_promoter_pair_score_chunks = [[] for _ in selected_tf_names]
+        per_tf_promoter_pair_target_chunks = [[] for _ in selected_tf_names]
 
     with torch.no_grad():
         for batch in loader:
@@ -2078,6 +2478,8 @@ def evaluate_dense(
                 per_tf_score_chunks = None
                 per_tf_target_chunks = None
                 per_tf_dilated_target_chunks = None
+                per_tf_promoter_pair_score_chunks = None
+                per_tf_promoter_pair_target_chunks = None
             else:
                 outputs = forward_dense_model(
                     model,
@@ -2116,7 +2518,7 @@ def evaluate_dense(
                 raise ValueError(
                     f"Logit/hard-label shape mismatch: {logits.shape} vs {hard_y.shape}"
                 )
-            loss_targets = hard_y if loss_name == "rank" else y
+            loss_targets = hard_y if loss_name in {"rank", "event_mil"} else y
             localization_loss = dense_loss(
                 logits,
                 loss_targets,
@@ -2128,6 +2530,10 @@ def evaluate_dense(
                 rank_temperature=rank_temperature,
                 rank_negative_weight=rank_negative_weight,
                 rank_negative_top_k=rank_negative_top_k,
+                event_pool_radius_bp=event_pool_radius_bp,
+                event_pool_temperature=event_pool_temperature,
+                event_negative_top_k=event_negative_top_k,
+                event_negative_weight=event_negative_weight,
             )
             loss = localization_loss
             window_targets = None
@@ -2169,6 +2575,17 @@ def evaluate_dense(
             micro_score_chunks.append(logits_cpu[valid_cpu])
             micro_target_chunks.append(target_cpu[valid_cpu])
             dilated_target_chunks.append(dilated_target_cpu[valid_cpu])
+
+            # This is a TransBind-like diagnostic only: a promoter-TF pair is
+            # positive when the TF has any annotated site in that promoter.
+            # Max pooling asks whether the dense model can surface at least one
+            # high-scoring locus, without changing its base-wise objective.
+            promoter_scores = logits.masked_fill(~valid, -torch.inf).amax(dim=-1)
+            promoter_targets = (target & valid).any(dim=-1)
+            promoter_scores_cpu = promoter_scores.detach().cpu().numpy()
+            promoter_targets_cpu = promoter_targets.detach().cpu().numpy()
+            promoter_pair_score_chunks.append(promoter_scores_cpu.reshape(-1))
+            promoter_pair_target_chunks.append(promoter_targets_cpu.reshape(-1))
             if window_logits is not None and window_targets is not None:
                 window_pred = window_logits.sigmoid() >= 0.5
                 window_target = window_targets >= 0.5
@@ -2187,6 +2604,8 @@ def evaluate_dense(
                 per_tf_score_chunks is not None
                 and per_tf_target_chunks is not None
                 and per_tf_dilated_target_chunks is not None
+                and per_tf_promoter_pair_score_chunks is not None
+                and per_tf_promoter_pair_target_chunks is not None
             ):
                 for local_tf_idx in range(logits_cpu.shape[1]):
                     tf_valid = valid_cpu[:, local_tf_idx, :]
@@ -2198,6 +2617,12 @@ def evaluate_dense(
                     )
                     per_tf_dilated_target_chunks[local_tf_idx].append(
                         dilated_target_cpu[:, local_tf_idx, :][tf_valid]
+                    )
+                    per_tf_promoter_pair_score_chunks[local_tf_idx].append(
+                        promoter_scores_cpu[:, local_tf_idx]
+                    )
+                    per_tf_promoter_pair_target_chunks[local_tf_idx].append(
+                        promoter_targets_cpu[:, local_tf_idx]
                     )
 
     precision = tp / (tp + fp) if (tp + fp) else 0.0
@@ -2246,14 +2671,22 @@ def evaluate_dense(
         window_score_chunks,
         window_target_chunks,
     )
+    promoter_pair_average_precision, promoter_pair_roc_auc = score_metrics(
+        promoter_pair_score_chunks,
+        promoter_pair_target_chunks,
+    )
     per_tf_metrics = None
+    promoter_pair_per_tf = None
     if (
         selected_tf_names is not None
         and per_tf_score_chunks is not None
         and per_tf_target_chunks is not None
         and per_tf_dilated_target_chunks is not None
+        and per_tf_promoter_pair_score_chunks is not None
+        and per_tf_promoter_pair_target_chunks is not None
     ):
         per_tf_metrics = []
+        promoter_pair_per_tf = []
         for name, score_chunk, target_chunk, dilated_target_chunk in zip(
             selected_tf_names,
             per_tf_score_chunks,
@@ -2283,6 +2716,25 @@ def evaluate_dense(
                     "dilated_roc_auc": tf_dilated_auc,
                     "dilated_positives": n_dilated_pos,
                     "valid_positions": n_total,
+                }
+            )
+        for name, score_chunk, target_chunk in zip(
+            selected_tf_names,
+            per_tf_promoter_pair_score_chunks,
+            per_tf_promoter_pair_target_chunks,
+        ):
+            tf_ap, tf_auc = score_metrics(score_chunk, target_chunk)
+            n_positive = int(
+                sum(chunk.astype(bool, copy=False).sum() for chunk in target_chunk)
+            )
+            n_pairs = int(sum(len(chunk) for chunk in target_chunk))
+            promoter_pair_per_tf.append(
+                {
+                    "tf_name": name,
+                    "average_precision": tf_ap,
+                    "roc_auc": tf_auc,
+                    "positive_promoters": n_positive,
+                    "promoter_tf_pairs": n_pairs,
                 }
             )
     return DenseSplitStats(
@@ -2315,6 +2767,9 @@ def evaluate_dense(
         ),
         window_average_precision=window_average_precision,
         window_roc_auc=window_roc_auc,
+        promoter_pair_average_precision=promoter_pair_average_precision,
+        promoter_pair_roc_auc=promoter_pair_roc_auc,
+        promoter_pair_per_tf=promoter_pair_per_tf,
     )
 
 
@@ -2533,26 +2988,28 @@ def main() -> None:
         evaluation_checkpoint = load_checkpoint_cpu(args.output_dir / "best.pt")
         model.load_state_dict(evaluation_checkpoint["model_state_dict"])
         print(f"Loaded existing best checkpoint for evaluation: {args.output_dir / 'best.pt'}")
+    elif args.resume_checkpoint is not None:
+        load_resume_checkpoint(
+            model,
+            args.resume_checkpoint,
+            expected_model_name=args.model,
+            expected_tf_names=dataset.tf_names,
+        )
     elif args.pretrained_dna_checkpoint is not None:
         load_pretrained_dna_branch(model, args.pretrained_dna_checkpoint, device)
-    if args.freeze_dna_branch and not args.evaluate_only:
+    if args.resume_checkpoint is not None:
+        configure_dna_finetuning(model, args.dna_finetune_mode)
+    elif args.freeze_dna_branch and not args.evaluate_only:
         freeze_dna_branch(model)
         print("Frozen DNA branch.")
     print("Trainable parameters:", count_parameters(model))
 
-    trainable_parameters = [
-        parameter for parameter in model.parameters() if parameter.requires_grad
-    ]
-    if not trainable_parameters:
-        raise ValueError("Model has no trainable parameters")
-    optimizer = torch.optim.AdamW(
-        trainable_parameters,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
+    optimizer = build_optimizer(model, args)
     scheduler = build_lr_scheduler(args, optimizer)
-    if args.no_pos_weight:
+    if args.no_pos_weight or args.loss == "event_mil":
         pos_weight = None
+        if args.loss == "event_mil" and not args.no_pos_weight:
+            print("Event MIL loss uses its own hard-background penalty; ignoring pos_weight.")
     elif args.label_mode == "merged_train_tfs":
         pos_weight = compute_merged_pos_weight(
             dataset,
@@ -2681,6 +3138,10 @@ def main() -> None:
             rank_temperature=args.rank_temperature,
             rank_negative_weight=args.rank_negative_weight,
             rank_negative_top_k=args.rank_negative_top_k,
+            event_pool_radius_bp=args.event_pool_radius_bp,
+            event_pool_temperature=args.event_pool_temperature,
+            event_negative_top_k=args.event_negative_top_k,
+            event_negative_weight=args.event_negative_weight,
             window_loss_weight=args.window_loss_weight,
             candidate_center_loss_weight=args.candidate_center_loss_weight,
             epoch=epoch,
@@ -2707,6 +3168,10 @@ def main() -> None:
                     rank_temperature=args.rank_temperature,
                     rank_negative_weight=args.rank_negative_weight,
                     rank_negative_top_k=args.rank_negative_top_k,
+                    event_pool_radius_bp=args.event_pool_radius_bp,
+                    event_pool_temperature=args.event_pool_temperature,
+                    event_negative_top_k=args.event_negative_top_k,
+                    event_negative_weight=args.event_negative_weight,
                     window_loss_weight=args.window_loss_weight,
                     tf_names=dataset.tf_names,
                     merged_label_name=validation_merged_label_name,
@@ -2964,20 +3429,21 @@ def main() -> None:
         }
         eval_pos_weight = pos_weight
 
-    if args.final_eval_scope == "test_only":
-        preferred_test_job_names = (
-            "test_promoters_test_tfs",
-            "test_promoters_train_tfs_plus_merged_train_tfs",
-            "test",
+    if args.final_eval_scope in {"test_only", "val_only"}:
+        preferred_job_names = (
+            ("test_promoters_test_tfs", "test")
+            if args.final_eval_scope == "test_only"
+            else ("val_promoters_val_tfs", "val")
         )
         final_jobs = {
             name: final_jobs[name]
-            for name in preferred_test_job_names
+            for name in preferred_job_names
             if name in final_jobs
         }
         if not final_jobs:
             raise ValueError(
-                "--final-eval-scope test_only requires a test evaluation slice"
+                f"--final-eval-scope {args.final_eval_scope} requires a matching "
+                "evaluation slice"
             )
     print("Final evaluation slices:", list(final_jobs))
 
@@ -3024,14 +3490,19 @@ def main() -> None:
             rank_temperature=args.rank_temperature,
             rank_negative_weight=args.rank_negative_weight,
             rank_negative_top_k=args.rank_negative_top_k,
+            event_pool_radius_bp=args.event_pool_radius_bp,
+            event_pool_temperature=args.event_pool_temperature,
+            event_negative_top_k=args.event_negative_top_k,
+            event_negative_weight=args.event_negative_weight,
             window_loss_weight=args.window_loss_weight,
             tf_names=dataset.tf_names,
             merged_label_name=merged_label_name,
         )
         final_metrics[split_name] = asdict(split_stats)
-    save_json(args.output_dir / "final_metrics.json", final_metrics)
+    final_metrics_path = args.final_metrics_out or (args.output_dir / "final_metrics.json")
+    save_json(final_metrics_path, final_metrics)
     print("Final metrics:", final_metrics)
-    print(f"Saved outputs to: {args.output_dir}")
+    print(f"Saved final metrics to: {final_metrics_path}")
 
 
 if __name__ == "__main__":
