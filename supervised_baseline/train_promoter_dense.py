@@ -157,6 +157,7 @@ class DenseSplitStats:
 
 MULTITASK_LABEL_MODE = "tf_and_merged_train_tfs"
 LABEL_MODES = ("tf", "merged_train_tfs", MULTITASK_LABEL_MODE)
+MULTITASK_EVAL_HEADS = ("all", "merged")
 LOSS_NAMES = ("bce", "focal", "rank", "event_mil")
 TRAINING_WINDOW_MODES = ("full_promoter", "sampled_windows")
 FINAL_EVAL_SCOPES = ("all", "test_only", "val_only")
@@ -306,6 +307,17 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Use per-TF dense labels, or collapse labels into one DNA-only "
             "channel using training TFs only."
+        ),
+    )
+    parser.add_argument(
+        "--multitask-eval-head",
+        choices=MULTITASK_EVAL_HEADS,
+        default="all",
+        help=(
+            "For --label-mode tf_and_merged_train_tfs, report either every "
+            "auxiliary TF head plus the merged head, or only the merged generic "
+            "head. Training always supervises every selected TF head and the "
+            "merged head."
         ),
     )
     parser.add_argument(
@@ -1198,6 +1210,18 @@ def select_multitask_axis(
     tf_part = tensor[:, :-1, ...].index_select(1, tf_indices)
     merged_part = tensor[:, -1:, ...]
     return torch.cat([tf_part, merged_part], dim=1)
+
+
+def select_multitask_evaluation_head(
+    tensor: torch.Tensor,
+    evaluation_head: str,
+) -> torch.Tensor:
+    """Keep all multitask outputs or only the final generic merged output."""
+    if evaluation_head == "all":
+        return tensor
+    if evaluation_head == "merged":
+        return tensor[:, -1:, ...]
+    raise ValueError(f"Unknown multitask evaluation head: {evaluation_head}")
 
 
 def make_dense_targets(
@@ -2418,6 +2442,7 @@ def evaluate_dense(
     window_loss_weight: float,
     tf_names: list[str] | None = None,
     merged_label_name: str = "merged_train_tfs",
+    multitask_eval_head: str = "all",
 ) -> DenseSplitStats:
     model.eval()
     total_loss = 0.0
@@ -2449,14 +2474,17 @@ def evaluate_dense(
         if label_mode == "merged_train_tfs":
             selected_tf_names = [merged_label_name]
         elif is_multitask_label_mode(label_mode):
-            if model_tf_indices is None:
-                selected_tf_names = [str(name) for name in tf_names]
+            if multitask_eval_head == "merged":
+                selected_tf_names = [merged_label_name]
             else:
-                selected_tf_names = [
-                    str(tf_names[int(idx)])
-                    for idx in model_tf_indices.detach().cpu().numpy().tolist()
-                ]
-            selected_tf_names.append(merged_label_name)
+                if model_tf_indices is None:
+                    selected_tf_names = [str(name) for name in tf_names]
+                else:
+                    selected_tf_names = [
+                        str(tf_names[int(idx)])
+                        for idx in model_tf_indices.detach().cpu().numpy().tolist()
+                    ]
+                selected_tf_names.append(merged_label_name)
         elif model_tf_indices is None:
             selected_tf_names = [str(name) for name in tf_names]
         else:
@@ -2529,6 +2557,19 @@ def evaluate_dense(
                 logits = select_multitask_axis(logits, model_tf_indices)
                 if window_logits is not None:
                     window_logits = select_multitask_axis(window_logits, model_tf_indices)
+                y = select_multitask_evaluation_head(y, multitask_eval_head)
+                hard_y = select_multitask_evaluation_head(hard_y, multitask_eval_head)
+                logits = select_multitask_evaluation_head(logits, multitask_eval_head)
+                if window_logits is not None:
+                    window_logits = select_multitask_evaluation_head(
+                        window_logits,
+                        multitask_eval_head,
+                    )
+                if batch_pos_weight is not None:
+                    batch_pos_weight = select_multitask_evaluation_head(
+                        batch_pos_weight,
+                        multitask_eval_head,
+                    )
             if logits.shape != y.shape:
                 raise ValueError(f"Logit/label shape mismatch: {logits.shape} vs {y.shape}")
             if logits.shape != hard_y.shape:
@@ -3083,10 +3124,18 @@ def main() -> None:
     validation_description = "validation promoters"
     if is_multitask_label_mode(args.label_mode):
         validation_model_tf_tensor = train_tf_tensor if use_tf_holdout else None
-        validation_merge_tf_tensor = train_tf_tensor if use_tf_holdout else None
-        validation_description = (
-            "validation promoters with train TF heads and merged train TF union"
-        )
+        if args.multitask_eval_head == "merged" and val_tf_tensor is not None:
+            validation_merge_tf_tensor = val_tf_tensor
+            validation_merged_label_name = "merged_val_tfs"
+            validation_description = (
+                "validation promoters with the generic merged head against "
+                "the held-out validation TF union"
+            )
+        else:
+            validation_merge_tf_tensor = train_tf_tensor if use_tf_holdout else None
+            validation_description = (
+                "validation promoters with train TF heads and merged train TF union"
+            )
     if use_tf_holdout and args.label_mode == "tf":
         if validation_model_tf_tensor is not None and validation_loader is None:
             validation_loader = train_eval_loader
@@ -3192,6 +3241,7 @@ def main() -> None:
                     window_loss_weight=args.window_loss_weight,
                     tf_names=dataset.tf_names,
                     merged_label_name=validation_merged_label_name,
+                    multitask_eval_head=args.multitask_eval_head,
                 ),
             )
 
@@ -3417,26 +3467,50 @@ def main() -> None:
             )
         eval_pos_weight = pos_weight
     elif use_tf_holdout and is_multitask_label_mode(args.label_mode):
-        final_jobs = {
-            "train_promoters_train_tfs_plus_merged_train_tfs": (
-                train_eval_loader,
-                train_tf_tensor,
-                train_tf_tensor,
-                "merged_train_tfs",
-            ),
-            "val_promoters_train_tfs_plus_merged_train_tfs": (
-                val_loader,
-                train_tf_tensor,
-                train_tf_tensor,
-                "merged_train_tfs",
-            ),
-            "test_promoters_train_tfs_plus_merged_train_tfs": (
-                test_loader,
-                train_tf_tensor,
-                train_tf_tensor,
-                "merged_train_tfs",
-            ),
-        }
+        if args.multitask_eval_head == "merged":
+            final_jobs = {
+                "train_promoters_train_tfs": (
+                    train_eval_loader,
+                    train_tf_tensor,
+                    train_tf_tensor,
+                    "merged_train_tfs",
+                ),
+            }
+            if val_tf_tensor is not None:
+                final_jobs["val_promoters_val_tfs"] = (
+                    val_loader,
+                    train_tf_tensor,
+                    val_tf_tensor,
+                    "merged_val_tfs",
+                )
+            if test_tf_tensor is not None:
+                final_jobs["test_promoters_test_tfs"] = (
+                    test_loader,
+                    train_tf_tensor,
+                    test_tf_tensor,
+                    "merged_test_tfs",
+                )
+        else:
+            final_jobs = {
+                "train_promoters_train_tfs_plus_merged_train_tfs": (
+                    train_eval_loader,
+                    train_tf_tensor,
+                    train_tf_tensor,
+                    "merged_train_tfs",
+                ),
+                "val_promoters_train_tfs_plus_merged_train_tfs": (
+                    val_loader,
+                    train_tf_tensor,
+                    train_tf_tensor,
+                    "merged_train_tfs",
+                ),
+                "test_promoters_train_tfs_plus_merged_train_tfs": (
+                    test_loader,
+                    train_tf_tensor,
+                    train_tf_tensor,
+                    "merged_train_tfs",
+                ),
+            }
         eval_pos_weight = pos_weight
     else:
         final_jobs = {
@@ -3514,6 +3588,7 @@ def main() -> None:
             window_loss_weight=args.window_loss_weight,
             tf_names=dataset.tf_names,
             merged_label_name=merged_label_name,
+            multitask_eval_head=args.multitask_eval_head,
         )
         final_metrics[split_name] = asdict(split_stats)
     final_metrics_path = args.final_metrics_out or (args.output_dir / "final_metrics.json")
