@@ -1854,6 +1854,7 @@ def align_dna_branch_args_from_checkpoint(
     )
     if checkpoint_model not in {
         "dense_motif_dilated_attention_cnn",
+        "dense_motif_dilated_attention_multitask_cnn",
         "dense_protein_residual_bilinear_cnn",
         "dense_protein_direct_scorer_cnn",
         "dense_protein_film_motif_cnn",
@@ -1937,6 +1938,22 @@ def load_pretrained_dna_branch(
             for key, value in state.items()
             if str(key).startswith("dna_model.")
         }
+
+    # A multitask DNA checkpoint has TF-specific and merged output heads, while
+    # protein-conditioned models only reuse the shared DNA encoder.
+    if any(str(key).startswith(("tf_head.", "merged_head.")) for key in state):
+        encoder_prefixes = (
+            "motif_stem.",
+            "stem_norm.",
+            "context_blocks.",
+            "attention_blocks.",
+        )
+        state = {
+            str(key): value
+            for key, value in state.items()
+            if str(key).startswith(encoder_prefixes)
+        }
+        print("Extracted shared encoder from multitask DNA checkpoint.")
 
     incompatible = dna_model.load_state_dict(state, strict=False)
     missing = list(incompatible.missing_keys)
