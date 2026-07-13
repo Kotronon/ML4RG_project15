@@ -1,0 +1,1129 @@
+{
+  "abf1": {
+    "assigned_feature": 3715,
+    "auroc": 0.5122728632225594,
+    "ap": 0.039421531906192256,
+    "n_positive_positions": 11349,
+    "prevalence": 0.019013776569277396
+  },
+  "aft2": {
+    "assigned_feature": 979,
+    "auroc": 0.5571639773713353,
+    "ap": 0.010295625400182255,
+    "n_positive_positions": 571,
+    "prevalence": 0.0009566363927268828
+  },
+  "aor1": {
+    "assigned_feature": 1374,
+    "auroc": 0.5363518231887324,
+    "ap": 0.005138749076486901,
+    "n_positive_positions": 760,
+    "prevalence": 0.001273281363349266
+  },
+  "arp7": {
+    "assigned_feature": 2350,
+    "auroc": 0.5097928724713671,
+    "ap": 0.006333452829124109,
+    "n_positive_positions": 2779,
+    "prevalence": 0.004655853827299487
+  },
+  "bdf1": {
+    "assigned_feature": 3370,
+    "auroc": 0.5125277434124673,
+    "ap": 0.02001494219255813,
+    "n_positive_positions": 9332,
+    "prevalence": 0.015634554845757043
+  },
+  "bdf2": {
+    "assigned_feature": 4392,
+    "auroc": 0.5202846581818673,
+    "ap": 0.024020492652218155,
+    "n_positive_positions": 6033,
+    "prevalence": 0.010107508506692266
+  },
+  "bdp1": {
+    "assigned_feature": 271,
+    "auroc": 0.6188858743885833,
+    "ap": 0.07028334991089952,
+    "n_positive_positions": 2099,
+    "prevalence": 0.003516602081144881
+  },
+  "bre1": {
+    "assigned_feature": 4012,
+    "auroc": 0.5049629459857264,
+    "ap": 0.0034972552604988875,
+    "n_positive_positions": 1780,
+    "prevalence": 0.002982158982581176
+  },
+  "brf1": {
+    "assigned_feature": 4808,
+    "auroc": 0.5977898806509895,
+    "ap": 0.12641511474460088,
+    "n_positive_positions": 2791,
+    "prevalence": 0.004675958269878686
+  },
+  "brn1": {
+    "assigned_feature": 3490,
+    "auroc": 0.5003711000497894,
+    "ap": 0.0007136843837918107,
+    "n_positive_positions": 423,
+    "prevalence": 0.0007086816009167626
+  },
+  "cbc2": {
+    "assigned_feature": 1537,
+    "auroc": 0.502551660144721,
+    "ap": 0.012153089695067135,
+    "n_positive_positions": 6954,
+    "prevalence": 0.011650524474645785
+  },
+  "cbf1": {
+    "assigned_feature": 6119,
+    "auroc": 0.5304016266502316,
+    "ap": 0.05822164482057548,
+    "n_positive_positions": 2986,
+    "prevalence": 0.005002655461790669
+  },
+  "cca1": {
+    "assigned_feature": 3795,
+    "auroc": 0.5027191547066449,
+    "ap": 0.00397908896976676,
+    "n_positive_positions": 2122,
+    "prevalence": 0.0035551355960883454
+  },
+  "ccl1": {
+    "assigned_feature": 2241,
+    "auroc": 0.5204898119574902,
+    "ap": 0.0419674601620393,
+    "n_positive_positions": 18010,
+    "prevalence": 0.03017341757094774
+  },
+  "cdc46": {
+    "assigned_feature": 5541,
+    "auroc": 0.5883048627512594,
+    "ap": 0.050081677389946774,
+    "n_positive_positions": 3318,
+    "prevalence": 0.005558878373148507
+  },
+  "cha4": {
+    "assigned_feature": 3038,
+    "auroc": 0.5044907539650445,
+    "ap": 0.0017187100958406826,
+    "n_positive_positions": 546,
+    "prevalence": 0.0009147521373535517
+  },
+  "chd1": {
+    "assigned_feature": 5745,
+    "auroc": 0.5364166969711816,
+    "ap": 0.005393503203171603,
+    "n_positive_positions": 739,
+    "prevalence": 0.001238098588835668
+  },
+  "ckb2": {
+    "assigned_feature": 4003,
+    "auroc": 0.5152936231768851,
+    "ap": 0.0021979495442431664,
+    "n_positive_positions": 834,
+    "prevalence": 0.0013972587592543263
+  },
+  "csn12": {
+    "assigned_feature": 5663,
+    "auroc": 0.5128305485424897,
+    "ap": 0.007846720314172795,
+    "n_positive_positions": 3421,
+    "prevalence": 0.0057314415052866306
+  },
+  "ctdser7": {
+    "assigned_feature": 2642,
+    "auroc": 0.5377844780269865,
+    "ap": 0.0533054991043173,
+    "n_positive_positions": 19476,
+    "prevalence": 0.032629510306039874
+  },
+  "cyc8": {
+    "assigned_feature": 5605,
+    "auroc": 0.5053071244391105,
+    "ap": 0.00808451996472665,
+    "n_positive_positions": 4277,
+    "prevalence": 0.007165558409269488
+  },
+  "dbp2": {
+    "assigned_feature": 3385,
+    "auroc": 0.5025913207222368,
+    "ap": 0.0034361747046329954,
+    "n_positive_positions": 1860,
+    "prevalence": 0.0031161885997758355
+  },
+  "dig1": {
+    "assigned_feature": 1754,
+    "auroc": 0.5089519706489546,
+    "ap": 0.0034871610253236346,
+    "n_positive_positions": 1124,
+    "prevalence": 0.0018831161215849671
+  },
+  "ecm22": {
+    "assigned_feature": 1403,
+    "auroc": 0.499981435958314,
+    "ap": 0.0029053269384589917,
+    "n_positive_positions": 1656,
+    "prevalence": 0.0027744130759294536
+  },
+  "elf1": {
+    "assigned_feature": 4361,
+    "auroc": 0.5079305846216139,
+    "ap": 0.01097184773619029,
+    "n_positive_positions": 5949,
+    "prevalence": 0.009966777408637873
+  },
+  "esa1": {
+    "assigned_feature": 5788,
+    "auroc": 0.5053946885087623,
+    "ap": 0.0084202415192302,
+    "n_positive_positions": 4377,
+    "prevalence": 0.007333095430762813
+  },
+  "gcn5": {
+    "assigned_feature": 737,
+    "auroc": 0.585805169505088,
+    "ap": 0.023010910821254966,
+    "n_positive_positions": 2298,
+    "prevalence": 0.003850000753916597
+  },
+  "gcr1": {
+    "assigned_feature": 1697,
+    "auroc": 0.5017336959313463,
+    "ap": 0.0029888093387119095,
+    "n_positive_positions": 1650,
+    "prevalence": 0.002764360854639854
+  },
+  "gln3": {
+    "assigned_feature": 5080,
+    "auroc": 0.5008291647501385,
+    "ap": 0.002615129717270809,
+    "n_positive_positions": 1459,
+    "prevalence": 0.0024443651435876045
+  },
+  "god1": {
+    "assigned_feature": 4191,
+    "auroc": 0.5283691175611219,
+    "ap": 0.014867339690868713,
+    "n_positive_positions": 3204,
+    "prevalence": 0.005367886168646117
+  },
+  "gzf3": {
+    "assigned_feature": 3940,
+    "auroc": 0.5592782497412635,
+    "ap": 0.017679411137076436,
+    "n_positive_positions": 4322,
+    "prevalence": 0.007240950068941484
+  },
+  "hal9": {
+    "assigned_feature": 5767,
+    "auroc": 0.5011346393532736,
+    "ap": 0.002794459225988288,
+    "n_positive_positions": 388,
+    "prevalence": 0.0006500436433940991
+  },
+  "hap1": {
+    "assigned_feature": 1257,
+    "auroc": 0.5170766316788403,
+    "ap": 0.0071104512524302116,
+    "n_positive_positions": 1715,
+    "prevalence": 0.002873259918610515
+  },
+  "hap2": {
+    "assigned_feature": 1915,
+    "auroc": 0.5050637916256995,
+    "ap": 0.004578996690063777,
+    "n_positive_positions": 537,
+    "prevalence": 0.0008996738054191525
+  },
+  "hap3": {
+    "assigned_feature": 3123,
+    "auroc": 0.5726354235810591,
+    "ap": 0.0987905434538631,
+    "n_positive_positions": 2667,
+    "prevalence": 0.004468212363226964
+  },
+  "hap5": {
+    "assigned_feature": 3128,
+    "auroc": 0.5134762331843254,
+    "ap": 0.011299382011104605,
+    "n_positive_positions": 770,
+    "prevalence": 0.0012900350654985987
+  },
+  "hir1": {
+    "assigned_feature": 1094,
+    "auroc": 0.49982594817047804,
+    "ap": 0.0012305169659324682,
+    "n_positive_positions": 456,
+    "prevalence": 0.0007639688180095597
+  },
+  "hmo1": {
+    "assigned_feature": 4128,
+    "auroc": 0.6366230976076104,
+    "ap": 0.09523610621410236,
+    "n_positive_positions": 2464,
+    "prevalence": 0.004128112209595515
+  },
+  "hos2": {
+    "assigned_feature": 1540,
+    "auroc": 0.5079916478245734,
+    "ap": 0.005286164866916586,
+    "n_positive_positions": 2606,
+    "prevalence": 0.0043660147801160365
+  },
+  "hot1": {
+    "assigned_feature": 5623,
+    "auroc": 0.5010018516849873,
+    "ap": 0.002005948460666887,
+    "n_positive_positions": 769,
+    "prevalence": 0.0012883596952836653
+  },
+  "hpr1": {
+    "assigned_feature": 2450,
+    "auroc": 0.5041708061251158,
+    "ap": 0.001467907814871676,
+    "n_positive_positions": 762,
+    "prevalence": 0.0012766321037791326
+  },
+  "hsf1": {
+    "assigned_feature": 6084,
+    "auroc": 0.5282004816246147,
+    "ap": 0.016329830806459392,
+    "n_positive_positions": 2147,
+    "prevalence": 0.0035970198514616767
+  },
+  "hst1": {
+    "assigned_feature": 458,
+    "auroc": 0.5040423456326142,
+    "ap": 0.0062277612499566275,
+    "n_positive_positions": 3555,
+    "prevalence": 0.005955941114087686
+  },
+  "htl1": {
+    "assigned_feature": 292,
+    "auroc": 0.5955046807083425,
+    "ap": 0.05113483316671402,
+    "n_positive_positions": 2797,
+    "prevalence": 0.004686010491168286
+  },
+  "ifh1": {
+    "assigned_feature": 836,
+    "auroc": 0.6201721915476487,
+    "ap": 0.06808555127627036,
+    "n_positive_positions": 4634,
+    "prevalence": 0.007763665576000656
+  },
+  "ino2": {
+    "assigned_feature": 2817,
+    "auroc": 0.6047509023674664,
+    "ap": 0.0283494990931681,
+    "n_positive_positions": 613,
+    "prevalence": 0.001027001941754079
+  },
+  "ino4": {
+    "assigned_feature": 3811,
+    "auroc": 0.538743811983734,
+    "ap": 0.031621671746608924,
+    "n_positive_positions": 559,
+    "prevalence": 0.0009365319501476838
+  },
+  "leo1": {
+    "assigned_feature": 2740,
+    "auroc": 0.5128275353947016,
+    "ap": 0.016499816731879894,
+    "n_positive_positions": 8050,
+    "prevalence": 0.01348673023021262
+  },
+  "leu3": {
+    "assigned_feature": 673,
+    "auroc": 0.5209390106165964,
+    "ap": 0.026815295084735787,
+    "n_positive_positions": 779,
+    "prevalence": 0.0013051133974329979
+  },
+  "lys14": {
+    "assigned_feature": 4013,
+    "auroc": 0.5373039650720249,
+    "ap": 0.0038252475878346676,
+    "n_positive_positions": 416,
+    "prevalence": 0.0006969540094122298
+  },
+  "lys20": {
+    "assigned_feature": 3063,
+    "auroc": 0.5038428846736304,
+    "ap": 0.004519177029680752,
+    "n_positive_positions": 2405,
+    "prevalence": 0.004029265366914454
+  },
+  "maf1": {
+    "assigned_feature": 2658,
+    "auroc": 0.5034108174777341,
+    "ap": 0.001160878158295261,
+    "n_positive_positions": 611,
+    "prevalence": 0.0010236512013242127
+  },
+  "mcm1": {
+    "assigned_feature": 3458,
+    "auroc": 0.528647544404932,
+    "ap": 0.054116305867413485,
+    "n_positive_positions": 4923,
+    "prevalence": 0.008247847568116364
+  },
+  "mcm16": {
+    "assigned_feature": 3829,
+    "auroc": 0.5278758795558917,
+    "ap": 0.008260137546872354,
+    "n_positive_positions": 336,
+    "prevalence": 0.0005629243922175703
+  },
+  "met4": {
+    "assigned_feature": 1804,
+    "auroc": 0.5039169126420694,
+    "ap": 0.005948657418255425,
+    "n_positive_positions": 2834,
+    "prevalence": 0.004747999189120816
+  },
+  "mif2": {
+    "assigned_feature": 5521,
+    "auroc": 0.562745405060189,
+    "ap": 0.024780888548330427,
+    "n_positive_positions": 1593,
+    "prevalence": 0.002668864752388659
+  },
+  "mlp1": {
+    "assigned_feature": 477,
+    "auroc": 0.5127387717663715,
+    "ap": 0.00176973396603454,
+    "n_positive_positions": 462,
+    "prevalence": 0.0007740210392991591
+  },
+  "mss11": {
+    "assigned_feature": 1991,
+    "auroc": 0.5041451691742146,
+    "ap": 0.0019368795118985447,
+    "n_positive_positions": 610,
+    "prevalence": 0.0010219758311092793
+  },
+  "npl3": {
+    "assigned_feature": 1911,
+    "auroc": 0.5097762609346695,
+    "ap": 0.012674515116932631,
+    "n_positive_positions": 6983,
+    "prevalence": 0.01169911021087885
+  },
+  "nrd1": {
+    "assigned_feature": 2124,
+    "auroc": 0.5014149655987018,
+    "ap": 0.026687479465137682,
+    "n_positive_positions": 15767,
+    "prevalence": 0.02641556217885247
+  },
+  "nrm1": {
+    "assigned_feature": 5220,
+    "auroc": 0.5101914722854588,
+    "ap": 0.010125481697205448,
+    "n_positive_positions": 2925,
+    "prevalence": 0.004900457878679741
+  },
+  "nut1": {
+    "assigned_feature": 5961,
+    "auroc": 0.5192738964556362,
+    "ap": 0.014660738215824365,
+    "n_positive_positions": 3613,
+    "prevalence": 0.006053112586553814
+  },
+  "oaf3": {
+    "assigned_feature": 1066,
+    "auroc": 0.5351928462418366,
+    "ap": 0.012099457745917998,
+    "n_positive_positions": 484,
+    "prevalence": 0.0008108791840276905
+  },
+  "pcf11": {
+    "assigned_feature": 515,
+    "auroc": 0.5076541880783559,
+    "ap": 0.024562086920818068,
+    "n_positive_positions": 13319,
+    "prevalence": 0.022314255892695888
+  },
+  "pdr1": {
+    "assigned_feature": 2704,
+    "auroc": 0.5610709348877566,
+    "ap": 0.026683883109093757,
+    "n_positive_positions": 3305,
+    "prevalence": 0.005537098560354375
+  },
+  "pdr3": {
+    "assigned_feature": 1319,
+    "auroc": 0.542415436785342,
+    "ap": 0.011616543800090615,
+    "n_positive_positions": 330,
+    "prevalence": 0.0005528721709279708
+  },
+  "pgd1": {
+    "assigned_feature": 1341,
+    "auroc": 0.5044558386584522,
+    "ap": 0.007310554543832216,
+    "n_positive_positions": 2557,
+    "prevalence": 0.004283921639584307
+  },
+  "pho23": {
+    "assigned_feature": 2233,
+    "auroc": 0.5151809637122432,
+    "ap": 0.0020089614065118885,
+    "n_positive_positions": 645,
+    "prevalence": 0.001080613788631943
+  },
+  "prp4": {
+    "assigned_feature": 6021,
+    "auroc": 0.5257327865218315,
+    "ap": 0.006356805052014672,
+    "n_positive_positions": 1372,
+    "prevalence": 0.002298607934888412
+  },
+  "pub1": {
+    "assigned_feature": 2177,
+    "auroc": 0.5089670182329574,
+    "ap": 0.0025408210283193555,
+    "n_positive_positions": 726,
+    "prevalence": 0.0012163187760415358
+  },
+  "rad6": {
+    "assigned_feature": 3545,
+    "auroc": 0.541976249652389,
+    "ap": 0.00808334341221484,
+    "n_positive_positions": 1963,
+    "prevalence": 0.0032887517319139595
+  },
+  "rcs1": {
+    "assigned_feature": 122,
+    "auroc": 0.5100441235658957,
+    "ap": 0.01776172391978024,
+    "n_positive_positions": 297,
+    "prevalence": 0.0004975849538351737
+  },
+  "ref2": {
+    "assigned_feature": 1786,
+    "auroc": 0.5861059190484111,
+    "ap": 0.07063868974547084,
+    "n_positive_positions": 15164,
+    "prevalence": 0.025405313939247724
+  },
+  "rif1": {
+    "assigned_feature": 2210,
+    "auroc": 0.5158005202631667,
+    "ap": 0.011958751084528896,
+    "n_positive_positions": 902,
+    "prevalence": 0.001511183933869787
+  },
+  "rif2": {
+    "assigned_feature": 541,
+    "auroc": 0.5191585104068857,
+    "ap": 0.021613533575362966,
+    "n_positive_positions": 1934,
+    "prevalence": 0.0032401659956808955
+  },
+  "rlm1": {
+    "assigned_feature": 4475,
+    "auroc": 0.5068578929915872,
+    "ap": 0.0035331991804252918,
+    "n_positive_positions": 1674,
+    "prevalence": 0.002804569739798252
+  },
+  "rna14": {
+    "assigned_feature": 2618,
+    "auroc": 0.5011744491118254,
+    "ap": 0.021099840247559187,
+    "n_positive_positions": 12361,
+    "prevalence": 0.02070925122678984
+  },
+  "rpb3": {
+    "assigned_feature": 5069,
+    "auroc": 0.5065087835518597,
+    "ap": 0.02917814416480854,
+    "n_positive_positions": 16782,
+    "prevalence": 0.028116062947009714
+  },
+  "rpb7": {
+    "assigned_feature": 32,
+    "auroc": 0.5095284797455925,
+    "ap": 0.022555692738728216,
+    "n_positive_positions": 12643,
+    "prevalence": 0.021181705627401015
+  },
+  "rpc17": {
+    "assigned_feature": 3574,
+    "auroc": 0.5455823815896174,
+    "ap": 0.03760708258351747,
+    "n_positive_positions": 2340,
+    "prevalence": 0.003920366302943793
+  },
+  "rpc19": {
+    "assigned_feature": 4687,
+    "auroc": 0.587107836121121,
+    "ap": 0.04807492443380976,
+    "n_positive_positions": 1841,
+    "prevalence": 0.0030843565656921037
+  },
+  "rpc25": {
+    "assigned_feature": 2212,
+    "auroc": 0.5367065440211004,
+    "ap": 0.02011844102661606,
+    "n_positive_positions": 2614,
+    "prevalence": 0.004379417741835502
+  },
+  "rpc40": {
+    "assigned_feature": 5251,
+    "auroc": 0.575447747979691,
+    "ap": 0.04935663555334497,
+    "n_positive_positions": 1826,
+    "prevalence": 0.003059226012468105
+  },
+  "rpc53": {
+    "assigned_feature": 1851,
+    "auroc": 0.762432201746439,
+    "ap": 0.12693404558115481,
+    "n_positive_positions": 1870,
+    "prevalence": 0.0031329423019251677
+  },
+  "rpo21": {
+    "assigned_feature": 5024,
+    "auroc": 0.5042340371147183,
+    "ap": 0.010636711796193268,
+    "n_positive_positions": 6076,
+    "prevalence": 0.010179549425934397
+  },
+  "rpo31": {
+    "assigned_feature": 4001,
+    "auroc": 0.6032647600086841,
+    "ap": 0.07589104123448204,
+    "n_positive_positions": 2384,
+    "prevalence": 0.003994082592400856
+  },
+  "rsc3": {
+    "assigned_feature": 1574,
+    "auroc": 0.573857863911303,
+    "ap": 0.0480671639832911,
+    "n_positive_positions": 3404,
+    "prevalence": 0.005702960211632766
+  },
+  "rsc8": {
+    "assigned_feature": 1240,
+    "auroc": 0.5013186565419898,
+    "ap": 0.002893552624973244,
+    "n_positive_positions": 1241,
+    "prevalence": 0.002079134436732157
+  },
+  "rtf1": {
+    "assigned_feature": 2084,
+    "auroc": 0.5024059513979089,
+    "ap": 0.01810960579627704,
+    "n_positive_positions": 10519,
+    "prevalence": 0.017623219290882803
+  },
+  "rtg3": {
+    "assigned_feature": 1001,
+    "auroc": 0.5011818131942124,
+    "ap": 0.003361304954444953,
+    "n_positive_positions": 363,
+    "prevalence": 0.0006081593880207679
+  },
+  "rtt103": {
+    "assigned_feature": 2824,
+    "auroc": 0.5195321742851393,
+    "ap": 0.016810843874639193,
+    "n_positive_positions": 5956,
+    "prevalence": 0.009978505000142407
+  },
+  "rxt3": {
+    "assigned_feature": 2099,
+    "auroc": 0.5095219459473167,
+    "ap": 0.004427822317918444,
+    "n_positive_positions": 1853,
+    "prevalence": 0.0031044610082713027
+  },
+  "set3": {
+    "assigned_feature": 1131,
+    "auroc": 0.5018631112904482,
+    "ap": 0.005375653903870745,
+    "n_positive_positions": 3089,
+    "prevalence": 0.005175218593928794
+  },
+  "sfh1": {
+    "assigned_feature": 5546,
+    "auroc": 0.5196433842449701,
+    "ap": 0.00812309267094904,
+    "n_positive_positions": 1697,
+    "prevalence": 0.0028431032547417165
+  },
+  "sfl1": {
+    "assigned_feature": 2927,
+    "auroc": 0.5768719276898672,
+    "ap": 0.017262761275370506,
+    "n_positive_positions": 3847,
+    "prevalence": 0.006445149216848193
+  },
+  "sgf73": {
+    "assigned_feature": 3851,
+    "auroc": 0.5033302123834932,
+    "ap": 0.016732169325266777,
+    "n_positive_positions": 9160,
+    "prevalence": 0.015346391168788522
+  },
+  "sgv1": {
+    "assigned_feature": 2180,
+    "auroc": 0.503326771568115,
+    "ap": 0.009104933847970068,
+    "n_positive_positions": 5203,
+    "prevalence": 0.008716951228297673
+  },
+  "shg1": {
+    "assigned_feature": 3184,
+    "auroc": 0.5040591181590606,
+    "ap": 0.004897142431887867,
+    "n_positive_positions": 2777,
+    "prevalence": 0.004652503086869621
+  },
+  "sin3": {
+    "assigned_feature": 4663,
+    "auroc": 0.5343619058756472,
+    "ap": 0.005617845851936484,
+    "n_positive_positions": 671,
+    "prevalence": 0.0011241734142202074
+  },
+  "sir2": {
+    "assigned_feature": 2442,
+    "auroc": 0.5350578406463167,
+    "ap": 0.00629938925200528,
+    "n_positive_positions": 753,
+    "prevalence": 0.0012615537718447334
+  },
+  "skn7": {
+    "assigned_feature": 3643,
+    "auroc": 0.5659888162399954,
+    "ap": 0.011050697998427872,
+    "n_positive_positions": 1823,
+    "prevalence": 0.0030541999018233053
+  },
+  "smc1": {
+    "assigned_feature": 1949,
+    "auroc": 0.4995785089320698,
+    "ap": 0.0004899005973268546,
+    "n_positive_positions": 290,
+    "prevalence": 0.000485857362330641
+  },
+  "smc3": {
+    "assigned_feature": 3182,
+    "auroc": 0.501421195995235,
+    "ap": 0.003574114246414209,
+    "n_positive_positions": 2031,
+    "prevalence": 0.0034026769065294204
+  },
+  "smc4": {
+    "assigned_feature": 2187,
+    "auroc": 0.5088754021430437,
+    "ap": 0.0029114882695073663,
+    "n_positive_positions": 515,
+    "prevalence": 0.0008628156606906211
+  },
+  "soh1": {
+    "assigned_feature": 1373,
+    "auroc": 0.5139606660421375,
+    "ap": 0.007881951142002339,
+    "n_positive_positions": 3097,
+    "prevalence": 0.005188621555648259
+  },
+  "spp1": {
+    "assigned_feature": 2010,
+    "auroc": 0.502641926805495,
+    "ap": 0.01227212388569668,
+    "n_positive_positions": 7056,
+    "prevalence": 0.011821412236568976
+  },
+  "spt10": {
+    "assigned_feature": 5272,
+    "auroc": 0.8708053618735213,
+    "ap": 0.16120499729659893,
+    "n_positive_positions": 335,
+    "prevalence": 0.000561249022002637
+  },
+  "spt15": {
+    "assigned_feature": 3168,
+    "auroc": 0.5212140736319406,
+    "ap": 0.06042716694559394,
+    "n_positive_positions": 30885,
+    "prevalence": 0.051743809088213265
+  },
+  "spt20": {
+    "assigned_feature": 2207,
+    "auroc": 0.6190064534772207,
+    "ap": 0.0653922675700907,
+    "n_positive_positions": 830,
+    "prevalence": 0.0013905572783945934
+  },
+  "spt21": {
+    "assigned_feature": 1269,
+    "auroc": 0.4948129924181728,
+    "ap": 0.002765479050471694,
+    "n_positive_positions": 1144,
+    "prevalence": 0.001916623525883632
+  },
+  "spt3": {
+    "assigned_feature": 3624,
+    "auroc": 0.5037649129400403,
+    "ap": 0.009324132733992916,
+    "n_positive_positions": 4794,
+    "prevalence": 0.008031724810389976
+  },
+  "spt5": {
+    "assigned_feature": 2848,
+    "auroc": 0.5027749583398206,
+    "ap": 0.029314262778200234,
+    "n_positive_positions": 17255,
+    "prevalence": 0.02890851305867314
+  },
+  "spt6": {
+    "assigned_feature": 5539,
+    "auroc": 0.5034630337503226,
+    "ap": 0.02592790184910963,
+    "n_positive_positions": 15143,
+    "prevalence": 0.025370131164734126
+  },
+  "spt8": {
+    "assigned_feature": 5078,
+    "auroc": 0.5890827391572968,
+    "ap": 0.04252582553433649,
+    "n_positive_positions": 659,
+    "prevalence": 0.0011040689716410085
+  },
+  "srb4": {
+    "assigned_feature": 5063,
+    "auroc": 0.523083896515829,
+    "ap": 0.006862039462418494,
+    "n_positive_positions": 2347,
+    "prevalence": 0.0039320938944483255
+  },
+  "srb6": {
+    "assigned_feature": 4170,
+    "auroc": 0.50975087594593,
+    "ap": 0.0065682042154752325,
+    "n_positive_positions": 1424,
+    "prevalence": 0.0023857271860649406
+  },
+  "ssl1": {
+    "assigned_feature": 5485,
+    "auroc": 0.5187013619712478,
+    "ap": 0.09999838972206349,
+    "n_positive_positions": 54800,
+    "prevalence": 0.09181028777834183
+  },
+  "ssl2": {
+    "assigned_feature": 1563,
+    "auroc": 0.503054647534315,
+    "ap": 0.12045537108735942,
+    "n_positive_positions": 70968,
+    "prevalence": 0.11889767341338252
+  },
+  "ssn8": {
+    "assigned_feature": 816,
+    "auroc": 0.5334882746046216,
+    "ap": 0.009708704587942162,
+    "n_positive_positions": 590,
+    "prevalence": 0.0009884684268106146
+  },
+  "stb3": {
+    "assigned_feature": 1893,
+    "auroc": 0.5095541236278549,
+    "ap": 0.008250075188024026,
+    "n_positive_positions": 2285,
+    "prevalence": 0.0038282209411224645
+  },
+  "stb4": {
+    "assigned_feature": 2399,
+    "auroc": 0.519127576377727,
+    "ap": 0.0015200993331728942,
+    "n_positive_positions": 815,
+    "prevalence": 0.0013654267251705947
+  },
+  "stb5": {
+    "assigned_feature": 2435,
+    "auroc": 0.5077815826396506,
+    "ap": 0.006051577127105507,
+    "n_positive_positions": 2882,
+    "prevalence": 0.004828416959437612
+  },
+  "ste12": {
+    "assigned_feature": 159,
+    "auroc": 0.507679509545254,
+    "ap": 0.005604942523648151,
+    "n_positive_positions": 1806,
+    "prevalence": 0.0030257186081694403
+  },
+  "sua7": {
+    "assigned_feature": 5289,
+    "auroc": 0.5136776911426554,
+    "ap": 0.21480861993826766,
+    "n_positive_positions": 122371,
+    "prevalence": 0.2050167285715961
+  },
+  "sum1": {
+    "assigned_feature": 5853,
+    "auroc": 0.5127174047072199,
+    "ap": 0.01015274432305913,
+    "n_positive_positions": 3298,
+    "prevalence": 0.0055253709688498414
+  },
+  "sut1": {
+    "assigned_feature": 3803,
+    "auroc": 0.5128476390308034,
+    "ap": 0.007757450928144378,
+    "n_positive_positions": 2484,
+    "prevalence": 0.00416161961389418
+  },
+  "swd3": {
+    "assigned_feature": 457,
+    "auroc": 0.503684496222427,
+    "ap": 0.002742786466114749,
+    "n_positive_positions": 1316,
+    "prevalence": 0.00220478720285215
+  },
+  "swi1": {
+    "assigned_feature": 4,
+    "auroc": 0.5049276664063779,
+    "ap": 0.009133063772749292,
+    "n_positive_positions": 4663,
+    "prevalence": 0.007812251312233721
+  },
+  "swi5": {
+    "assigned_feature": 1845,
+    "auroc": 0.5044232997854974,
+    "ap": 0.0020127905840598213,
+    "n_positive_positions": 620,
+    "prevalence": 0.001038729533258612
+  },
+  "swi6": {
+    "assigned_feature": 382,
+    "auroc": 0.5161734746477666,
+    "ap": 0.0059661316163885925,
+    "n_positive_positions": 1353,
+    "prevalence": 0.0022667759008046804
+  },
+  "taf1": {
+    "assigned_feature": 15,
+    "auroc": 0.5848088583687973,
+    "ap": 0.03274937238545461,
+    "n_positive_positions": 2937,
+    "prevalence": 0.00492056232125894
+  },
+  "taf10": {
+    "assigned_feature": 6133,
+    "auroc": 0.5137952801421558,
+    "ap": 0.012068104135776078,
+    "n_positive_positions": 5672,
+    "prevalence": 0.009502699859101365
+  },
+  "taf11": {
+    "assigned_feature": 3011,
+    "auroc": 0.5767122837923827,
+    "ap": 0.03901361299528719,
+    "n_positive_positions": 3686,
+    "prevalence": 0.00617541461224394
+  },
+  "taf13": {
+    "assigned_feature": 2857,
+    "auroc": 0.6290640592962805,
+    "ap": 0.06986335009997818,
+    "n_positive_positions": 4160,
+    "prevalence": 0.006969540094122298
+  },
+  "taf3": {
+    "assigned_feature": 407,
+    "auroc": 0.5015651517742934,
+    "ap": 0.023758368133909705,
+    "n_positive_positions": 13670,
+    "prevalence": 0.022902310838137457
+  },
+  "taf4": {
+    "assigned_feature": 3697,
+    "auroc": 0.5432396179313566,
+    "ap": 0.03495810588342969,
+    "n_positive_positions": 5756,
+    "prevalence": 0.009643430957155757
+  },
+  "taf5": {
+    "assigned_feature": 4302,
+    "auroc": 0.5740021696564679,
+    "ap": 0.03762530406996013,
+    "n_positive_positions": 4249,
+    "prevalence": 0.007118648043251357
+  },
+  "taf6": {
+    "assigned_feature": 6026,
+    "auroc": 0.5230859471082709,
+    "ap": 0.020165273146195158,
+    "n_positive_positions": 4346,
+    "prevalence": 0.007281158954099882
+  },
+  "taf8": {
+    "assigned_feature": 3206,
+    "auroc": 0.5309999766575391,
+    "ap": 0.028987669132662555,
+    "n_positive_positions": 5518,
+    "prevalence": 0.009244692846001646
+  },
+  "tea1": {
+    "assigned_feature": 1595,
+    "auroc": 0.5023302409882734,
+    "ap": 0.0009382797430826171,
+    "n_positive_positions": 539,
+    "prevalence": 0.000903024545849019
+  },
+  "tfa1": {
+    "assigned_feature": 2586,
+    "auroc": 0.5054603069587902,
+    "ap": 0.09934231518380611,
+    "n_positive_positions": 58110,
+    "prevalence": 0.09735576318977086
+  },
+  "tfb3": {
+    "assigned_feature": 2614,
+    "auroc": 0.5200102563254986,
+    "ap": 0.08671229073490144,
+    "n_positive_positions": 44075,
+    "prevalence": 0.07384194222318277
+  },
+  "tfb4": {
+    "assigned_feature": 3247,
+    "auroc": 0.5021104430550666,
+    "ap": 0.1406069692664384,
+    "n_positive_positions": 83149,
+    "prevalence": 0.1393053580014844
+  },
+  "tfc7": {
+    "assigned_feature": 4696,
+    "auroc": 0.5774746660540222,
+    "ap": 0.08687633424700296,
+    "n_positive_positions": 2347,
+    "prevalence": 0.0039320938944483255
+  },
+  "tho1": {
+    "assigned_feature": 1263,
+    "auroc": 0.5077362704370716,
+    "ap": 0.003891116380890484,
+    "n_positive_positions": 1580,
+    "prevalence": 0.002647084939594527
+  },
+  "thp2": {
+    "assigned_feature": 2500,
+    "auroc": 0.5112877545238879,
+    "ap": 0.003996775643797487,
+    "n_positive_positions": 1947,
+    "prevalence": 0.003261945808475028
+  },
+  "toa1": {
+    "assigned_feature": 2487,
+    "auroc": 0.5149408381466271,
+    "ap": 0.04958413561733814,
+    "n_positive_positions": 25473,
+    "prevalence": 0.04267670548499455
+  },
+  "top1": {
+    "assigned_feature": 4899,
+    "auroc": 0.5151206477665053,
+    "ap": 0.003638660085414677,
+    "n_positive_positions": 1447,
+    "prevalence": 0.0024242607010084055
+  },
+  "tpk1": {
+    "assigned_feature": 4371,
+    "auroc": 0.5025142594219494,
+    "ap": 0.007494114694747097,
+    "n_positive_positions": 4221,
+    "prevalence": 0.007071737677233227
+  },
+  "tpk2": {
+    "assigned_feature": 1725,
+    "auroc": 0.5120547415435168,
+    "ap": 0.0019996097416783015,
+    "n_positive_positions": 642,
+    "prevalence": 0.0010755876779871432
+  },
+  "tup1": {
+    "assigned_feature": 2356,
+    "auroc": 0.5066920268009811,
+    "ap": 0.016506282134024598,
+    "n_positive_positions": 8173,
+    "prevalence": 0.01369280076664941
+  },
+  "ume1": {
+    "assigned_feature": 1652,
+    "auroc": 0.5056982674693087,
+    "ap": 0.010812614013578883,
+    "n_positive_positions": 5458,
+    "prevalence": 0.009144170633105651
+  },
+  "ume6": {
+    "assigned_feature": 1247,
+    "auroc": 0.53489518184314,
+    "ap": 0.06957359179567006,
+    "n_positive_positions": 4939,
+    "prevalence": 0.008274653491555296
+  },
+  "urc2": {
+    "assigned_feature": 3423,
+    "auroc": 0.5102855691963177,
+    "ap": 0.0014767586545120634,
+    "n_positive_positions": 539,
+    "prevalence": 0.000903024545849019
+  },
+  "vid21": {
+    "assigned_feature": 2401,
+    "auroc": 0.5168548847774591,
+    "ap": 0.017190970019783217,
+    "n_positive_positions": 979,
+    "prevalence": 0.0016401874404196467
+  },
+  "vps72": {
+    "assigned_feature": 2875,
+    "auroc": 0.5014577181086811,
+    "ap": 0.003542223903237576,
+    "n_positive_positions": 1539,
+    "prevalence": 0.002578394760782264
+  },
+  "war1": {
+    "assigned_feature": 2397,
+    "auroc": 0.5322801909106823,
+    "ap": 0.008756901390845534,
+    "n_positive_positions": 2879,
+    "prevalence": 0.004823390848792812
+  },
+  "ycs4": {
+    "assigned_feature": 287,
+    "auroc": 0.5333091424371689,
+    "ap": 0.001988429534514363,
+    "n_positive_positions": 517,
+    "prevalence": 0.0008661664011204875
+  },
+  "yrr1": {
+    "assigned_feature": 2127,
+    "auroc": 0.5199318579952152,
+    "ap": 0.01347138038667522,
+    "n_positive_positions": 2056,
+    "prevalence": 0.0034445611619027513
+  },
+  "ysh1": {
+    "assigned_feature": 3828,
+    "auroc": 0.553770927066605,
+    "ap": 0.03902962527138242,
+    "n_positive_positions": 12059,
+    "prevalence": 0.02020328942188
+  },
+  "yta7": {
+    "assigned_feature": 4870,
+    "auroc": 0.5009342150449424,
+    "ap": 0.02257630122365095,
+    "n_positive_positions": 13392,
+    "prevalence": 0.022436557918386016
+  }
+}
