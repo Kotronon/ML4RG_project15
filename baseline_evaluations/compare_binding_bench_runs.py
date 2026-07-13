@@ -162,9 +162,8 @@ def _nearest_rank_rows(topk_df, n_targets: int):
 
 
 def fallback_compare_runs(benchmark: Any, dataset: str, score: str, save_path: str) -> None:
-    """Binding-Bench-style fallback when the exact N-factor rank is absent."""
-    from mizani.palettes import brewer_pal
-    import plotnine as p9
+    """Render a portable Matplotlib report when Binding Bench's plotnine layout fails."""
+    import matplotlib.pyplot as plt
 
     data = benchmark.get(datasets=dataset, metrics=[score])
     full_metrics = _as_pandas(data[score])
@@ -185,64 +184,22 @@ def fallback_compare_runs(benchmark: Any, dataset: str, score: str, save_path: s
     }.get(score, score)
 
     display_names = sorted(topk_metrics["display_name"].dropna().unique().tolist())
-    colors = dict(zip(display_names, brewer_pal(type="qual", palette="Set2")(len(display_names))))
-
-    best_score_over_t = (
-        p9.ggplot(
-            topk_visible.groupby(["rank_t", "display_name"], as_index=False)[score]
-            .sum()
-            .sort_values("rank_t"),
-            p9.aes(x="rank_t", y=score, color="display_name", group="display_name"),
-        )
-        + p9.geom_line(size=.8)
-        + p9.geom_vline(xintercept=n_targets, alpha=.5, linetype="--")
-        + p9.labs(
-            x="Feature Rank",
-            y=f"{score_label} (Sum)",
-            color="Setup",
-            title="Best assignment over feature rank",
-        )
-        + p9.theme_classic()
-        + p9.scale_color_manual(colors)
-    )
+    palette = plt.get_cmap("Set2")
+    colors = {
+        name: palette(index % palette.N)
+        for index, name in enumerate(display_names)
+    }
 
     mean_score_bar = (
         selected_topk.groupby("display_name", as_index=False)[score]
         .sum()
         .assign(**{score: lambda df: df[score] / n_targets})
     )
-    mean_score_bar_plot = (
-        p9.ggplot(
-            mean_score_bar,
-            p9.aes(x=f"reorder(display_name, {score})", y=score, fill="display_name"),
-        )
-        + p9.geom_col(alpha=.75)
-        + p9.theme_classic()
-        + p9.theme(axis_text_x=p9.element_text(rotation=45, hjust=1))
-        + p9.labs(
-            x="Setup",
-            y=f"{score_label} (Mean)",
-            fill="Setup",
-            title="Best assignment at nearest N-factors",
-        )
-        + p9.scale_fill_manual(colors)
-    )
-
+    mean_score_bar = mean_score_bar.sort_values(score)
     mean_score_bar_overall = (
-        p9.ggplot(
-            full_metrics.groupby("display_name", as_index=False)[score].mean(),
-            p9.aes(x=f"reorder(display_name, {score})", y=score, fill="display_name"),
-        )
-        + p9.geom_col(alpha=.75)
-        + p9.theme_classic()
-        + p9.theme(axis_text_x=p9.element_text(rotation=45, hjust=1))
-        + p9.labs(
-            x="Setup",
-            y=f"{score_label} (Mean)",
-            fill="Setup",
-            title="Best assignment overall",
-        )
-        + p9.scale_fill_manual(colors)
+        full_metrics.groupby("display_name", as_index=False)[score]
+        .mean()
+        .sort_values(score)
     )
 
     tf_ranked_f_ranked = selected_topk.copy()
@@ -251,57 +208,49 @@ def fallback_compare_runs(benchmark: Any, dataset: str, score: str, save_path: s
         .rank(method="first", ascending=False)
         .astype(int)
     )
-    tf_ranked_f_ranked_plot = (
-        p9.ggplot(
-            tf_ranked_f_ranked,
-            p9.aes(x="score_rank", y=score, color="display_name", group="display_name"),
-        )
-        + p9.geom_line(size=.8)
-        + p9.scale_x_continuous(trans="log10")
-        + p9.theme_minimal()
-        + p9.labs(
-            x="TF Rank",
-            y=score_label,
-            color="Setup",
-            title=f"{score_label} per TF at nearest N-factors",
-        )
-        + p9.scale_color_manual(colors)
-    )
-
     tf_ranked_all_features = full_metrics.copy()
     tf_ranked_all_features["score_rank"] = (
         tf_ranked_all_features.groupby("display_name")[score]
         .rank(method="first", ascending=False)
         .astype(int)
     )
-    tf_ranked_all_features_plot = (
-        p9.ggplot(
-            tf_ranked_all_features,
-            p9.aes(x="score_rank", y=score, color="display_name", group="display_name"),
-        )
-        + p9.geom_line(size=.8)
-        + p9.scale_x_continuous(trans="log10")
-        + p9.theme_minimal()
-        + p9.labs(
-            x="TF Rank",
-            y=score_label,
-            color="Setup",
-            title=f"{score_label} per TF overall",
-        )
-        + p9.scale_color_manual(colors)
-    )
+    fig = plt.figure(figsize=(15, 10), constrained_layout=True)
+    grid = fig.add_gridspec(2, 3)
+    axes = [fig.add_subplot(grid[0, index]) for index in range(3)]
+    axes.extend([fig.add_subplot(grid[1, 0]), fig.add_subplot(grid[1, 1])])
 
-    hide_legend = lambda plot: plot + p9.theme(legend_position="none")
-    composition = (
-        (
-            hide_legend(best_score_over_t)
-            | hide_legend(mean_score_bar_plot)
-            | mean_score_bar_overall
-        )
-        / (hide_legend(tf_ranked_f_ranked_plot) | tf_ranked_all_features_plot)
-        + p9.theme(figure_size=(12, 12))
+    rank_sums = (
+        topk_visible.groupby(["rank_t", "display_name"], as_index=False)[score]
+        .sum()
+        .sort_values("rank_t")
     )
-    composition.save(save_path)
+    for display_name, group in rank_sums.groupby("display_name", sort=False):
+        axes[0].plot(group["rank_t"], group[score], label=display_name, color=colors[display_name])
+    axes[0].axvline(n_targets, color="black", linestyle="--", linewidth=1, alpha=.5)
+    axes[0].set(title="Best assignment over feature rank", xlabel="Feature Rank", ylabel=f"{score_label} (Sum)")
+
+    for axis, frame, title in (
+        (axes[1], mean_score_bar, "Best assignment at nearest N-factors"),
+        (axes[2], mean_score_bar_overall, "Best assignment overall"),
+    ):
+        axis.bar(frame["display_name"], frame[score], color=[colors[name] for name in frame["display_name"]])
+        axis.set(title=title, xlabel="Setup", ylabel=f"{score_label} (Mean)")
+        axis.tick_params(axis="x", rotation=45)
+
+    for axis, frame, title in (
+        (axes[3], tf_ranked_f_ranked, f"{score_label} per TF at nearest N-factors"),
+        (axes[4], tf_ranked_all_features, f"{score_label} per TF overall"),
+    ):
+        for display_name, group in frame.groupby("display_name", sort=False):
+            axis.plot(group["score_rank"], group[score], label=display_name, color=colors[display_name])
+        axis.set_xscale("log")
+        axis.set(title=title, xlabel="TF Rank", ylabel=score_label)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, title="Setup", loc="center right")
+    fig.savefig(save_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main() -> None:
@@ -329,7 +278,7 @@ def main() -> None:
                 save_path=str(output_path),
                 show=args.show,
             )
-        except IndexError as exc:
+        except (IndexError, TypeError) as exc:
             print(
                 f"Binding Bench plot failed for {score} ({exc}); "
                 "writing fallback plot with nearest available rank_t."
